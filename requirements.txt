@@ -17,3 +17,7 @@ tqdm>=4.62.0
 # Additional utilities
 scikit-learn>=0.24.0  # For additional statistical tools if needed
 seaborn>=0.11.0       # For enhanced visualizations if needed
+h5py>=3.0.0           # For reading HDF5 format files
+mat73>=0.59           # For reading MATLAB v7.3 files
+pyedflib>=0.1.30      # For reading EDF files if needed
+joblib>=1.0.0         # For parallel processing
