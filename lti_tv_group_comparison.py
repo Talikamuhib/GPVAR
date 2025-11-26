@@ -711,6 +711,45 @@ def compute_mode_averaged_frequency_response(results: List[Dict]) -> Dict:
         'n_subjects': n_subjects
     }
 
+def compute_graph_mode_response(results: List[Dict]) -> Dict:
+    """
+    Compute transfer function magnitude averaged over temporal frequencies,
+    yielding |G| vs graph frequency (λ) for each subject.
+    """
+    n_subjects = len(results)
+    n_modes = len(results[0]['lambdas'])
+
+    lti_mode_response = np.zeros((n_subjects, n_modes))
+    tv_mode_response = np.zeros((n_subjects, n_modes))
+
+    for idx, result in enumerate(results):
+        lti_mode_response[idx, :] = result['G_lti'].mean(axis=0)
+        tv_mode_response[idx, :] = result['G_tv_mean'].mean(axis=0)
+
+    lti_mean, lti_ci_lower, lti_ci_upper, lti_ci_margin = compute_confidence_interval(
+        lti_mode_response, axis=0
+    )
+    tv_mean, tv_ci_lower, tv_ci_upper, tv_ci_margin = compute_confidence_interval(
+        tv_mode_response, axis=0
+    )
+
+    return {
+        'lambdas': results[0]['lambdas'],
+        'lti_mean': lti_mean,
+        'lti_std': lti_mode_response.std(axis=0),
+        'lti_ci_lower': lti_ci_lower,
+        'lti_ci_upper': lti_ci_upper,
+        'lti_ci_margin': lti_ci_margin,
+        'tv_mean': tv_mean,
+        'tv_std': tv_mode_response.std(axis=0),
+        'tv_ci_lower': tv_ci_lower,
+        'tv_ci_upper': tv_ci_upper,
+        'tv_ci_margin': tv_ci_margin,
+        'lti_individual': lti_mode_response,
+        'tv_individual': tv_mode_response,
+        'n_subjects': n_subjects
+    }
+
 def compute_frequency_band_statistics(ad_results: List[Dict], hc_results: List[Dict]) -> pd.DataFrame:
     """
     Compute statistics for standard EEG frequency bands.
@@ -1444,6 +1483,110 @@ def plot_mode_averaged_frequency_responses(ad_results: List[Dict], hc_results: L
     plt.close()
     print(f"  Saved: {savepath2} (300 DPI)")
 
+def plot_graph_frequency_responses(ad_results: List[Dict], hc_results: List[Dict],
+                                   save_dir: Path):
+    """
+    Plot transfer function magnitude versus graph frequency for AD vs HC.
+    """
+    print("\nCreating transfer function vs graph frequency plots...")
+
+    ad_modes = compute_graph_mode_response(ad_results)
+    hc_modes = compute_graph_mode_response(hc_results)
+    lambdas = ad_modes['lambdas']
+
+    color_ad = '#E74C3C'
+    color_hc = '#3498DB'
+
+    fig, axes = plt.subplots(2, 2, figsize=(18, 10))
+
+    # Panel A: LTI response vs graph frequency
+    ax = axes[0, 0]
+    ax.plot(lambdas, ad_modes['lti_mean'], color=color_ad, linewidth=3,
+            label=f'AD LTI (n={ad_modes["n_subjects"]})', alpha=0.9)
+    ax.fill_between(lambdas, ad_modes['lti_ci_lower'], ad_modes['lti_ci_upper'],
+                    color=color_ad, alpha=0.25)
+
+    ax.plot(lambdas, hc_modes['lti_mean'], color=color_hc, linewidth=3,
+            label=f'HC LTI (n={hc_modes["n_subjects"]})', alpha=0.9)
+    ax.fill_between(lambdas, hc_modes['lti_ci_lower'], hc_modes['lti_ci_upper'],
+                    color=color_hc, alpha=0.25)
+
+    ax.set_xlabel('Graph frequency λ', fontsize=12, fontweight='bold')
+    ax.set_ylabel('Mean |G(ω, λ)|', fontsize=12, fontweight='bold')
+    ax.set_title('(A) LTI: Transfer Function vs Graph Frequency', fontsize=13, fontweight='bold')
+    ax.grid(True, linestyle='--', alpha=0.3)
+    ax.legend(framealpha=0.95)
+
+    # Panel B: Time-varying response vs graph frequency
+    ax = axes[0, 1]
+    ax.plot(lambdas, ad_modes['tv_mean'], color=color_ad, linewidth=3, linestyle='--',
+            label=f'AD TV (n={ad_modes["n_subjects"]})', alpha=0.9)
+    ax.fill_between(lambdas, ad_modes['tv_ci_lower'], ad_modes['tv_ci_upper'],
+                    color=color_ad, alpha=0.25)
+
+    ax.plot(lambdas, hc_modes['tv_mean'], color=color_hc, linewidth=3, linestyle='--',
+            label=f'HC TV (n={hc_modes["n_subjects"]})', alpha=0.9)
+    ax.fill_between(lambdas, hc_modes['tv_ci_lower'], hc_modes['tv_ci_upper'],
+                    color=color_hc, alpha=0.25)
+
+    ax.set_xlabel('Graph frequency λ', fontsize=12, fontweight='bold')
+    ax.set_ylabel('Mean |G(ω, λ)|', fontsize=12, fontweight='bold')
+    ax.set_title('(B) Time-Varying: Transfer Function vs Graph Frequency', fontsize=13, fontweight='bold')
+    ax.grid(True, linestyle='--', alpha=0.3)
+    ax.legend(framealpha=0.95)
+
+    # Panel C: Difference curves (AD - HC)
+    ax = axes[1, 0]
+    diff_lti = ad_modes['lti_mean'] - hc_modes['lti_mean']
+    diff_tv = ad_modes['tv_mean'] - hc_modes['tv_mean']
+
+    ax.plot(lambdas, diff_lti, color='black', linewidth=2.5, label='LTI Δ|G|')
+    ax.fill_between(lambdas, 0, diff_lti, where=(diff_lti > 0),
+                    color=color_ad, alpha=0.4, label='AD > HC')
+    ax.fill_between(lambdas, 0, diff_lti, where=(diff_lti < 0),
+                    color=color_hc, alpha=0.4, label='HC > AD')
+
+    ax.plot(lambdas, diff_tv, color='black', linewidth=2.0, linestyle='--', label='TV Δ|G|')
+
+    ax.axhline(0, color='gray', linestyle='-', linewidth=1.2)
+    ax.set_xlabel('Graph frequency λ', fontsize=12, fontweight='bold')
+    ax.set_ylabel('Difference Δ|G| (AD - HC)', fontsize=12, fontweight='bold')
+    ax.set_title('(C) Group Differences Across Graph Modes', fontsize=13, fontweight='bold')
+    ax.legend(framealpha=0.95)
+    ax.grid(True, linestyle='--', alpha=0.3)
+
+    # Panel D: Effect sizes along graph frequency
+    ax = axes[1, 1]
+    def compute_effect_size(ad_vals: np.ndarray, hc_vals: np.ndarray) -> np.ndarray:
+        pooled = np.sqrt((ad_vals.var(axis=0, ddof=1) + hc_vals.var(axis=0, ddof=1)) / 2)
+        return (ad_vals.mean(axis=0) - hc_vals.mean(axis=0)) / (pooled + 1e-10)
+
+    lti_effect = compute_effect_size(ad_modes['lti_individual'], hc_modes['lti_individual'])
+    tv_effect = compute_effect_size(ad_modes['tv_individual'], hc_modes['tv_individual'])
+
+    ax.plot(lambdas, lti_effect, color=color_ad, linewidth=2.5, label="LTI Cohen's d")
+    ax.plot(lambdas, tv_effect, color=color_hc, linewidth=2.5, linestyle='--', label="TV Cohen's d")
+    ax.axhline(0, color='black', linewidth=1.2)
+    ax.axhline(0.5, color='gray', linestyle='--', linewidth=1.0, alpha=0.6)
+    ax.axhline(-0.5, color='gray', linestyle='--', linewidth=1.0, alpha=0.6)
+    ax.axhline(0.8, color='gray', linestyle=':', linewidth=1.0, alpha=0.6)
+    ax.axhline(-0.8, color='gray', linestyle=':', linewidth=1.0, alpha=0.6)
+
+    ax.set_xlabel('Graph frequency λ', fontsize=12, fontweight='bold')
+    ax.set_ylabel("Cohen's d (AD - HC)", fontsize=12, fontweight='bold')
+    ax.set_title('(D) Effect Size Across Graph Modes', fontsize=13, fontweight='bold')
+    ax.grid(True, linestyle='--', alpha=0.3)
+    ax.legend(framealpha=0.95)
+
+    fig.suptitle('Transfer Function vs Graph Frequency: AD vs HC',
+                 fontsize=16, fontweight='bold')
+    plt.tight_layout()
+
+    savepath = save_dir / 'graph_frequency_transfer_functions.png'
+    plt.savefig(savepath, dpi=300, bbox_inches='tight', facecolor='white')
+    plt.close()
+    print(f"  Saved: {savepath} (300 DPI)")
+
 # ============================================================================
 # Visualization
 # ============================================================================
@@ -1710,6 +1853,7 @@ def main():
     print("="*80)
     plot_group_comparison(ad_results, hc_results, stats_df, OUT_DIR)
     plot_mode_averaged_frequency_responses(ad_results, hc_results, band_stats_df, OUT_DIR)
+    plot_graph_frequency_responses(ad_results, hc_results, OUT_DIR)
     
     # Save individual subject results
     print("\nSaving individual subject results...")
