@@ -114,14 +114,14 @@ TARGET_SFREQ = 100.0
 # Model settings
 RIDGE_LAMBDA = 5e-3
 
+# Fixed model parameters (NO model selection)
+FIXED_P = 30
+FIXED_K = 4
+
 # Time-varying analysis
 WINDOW_LENGTH_SEC = 10.0
 WINDOW_OVERLAP = 0.5
 MIN_WINDOWS = 5
-
-# Model selection ranges
-P_RANGE = [1, 2, 3, 5, 7, 10]
-K_RANGE = [1, 2, 3, 4]
 
 # Output
 OUT_DIR = Path("./group_comparison_lti_tv_analysis")
