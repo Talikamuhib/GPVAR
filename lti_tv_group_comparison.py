@@ -47,6 +47,48 @@ sns.set_palette("Set2")
 from tqdm import tqdm
 
 # ============================================================================
+# Helper Function for Confidence Intervals
+# ============================================================================
+
+def compute_confidence_interval(data: np.ndarray, confidence=0.95, axis=0):
+    """
+    Compute confidence interval using t-distribution.
+    
+    Parameters:
+    -----------
+    data : np.ndarray
+        Data array (subjects x features)
+    confidence : float
+        Confidence level (default 0.95 for 95% CI)
+    axis : int
+        Axis along which to compute CI (default 0 = across subjects)
+    
+    Returns:
+    --------
+    mean : np.ndarray
+        Mean values
+    ci_lower : np.ndarray
+        Lower bound of CI
+    ci_upper : np.ndarray
+        Upper bound of CI
+    ci_margin : np.ndarray
+        Margin of error (mean ± ci_margin)
+    """
+    n = data.shape[axis]
+    mean = np.mean(data, axis=axis)
+    sem = stats.sem(data, axis=axis)
+    
+    # t-critical value for 95% CI
+    df = n - 1
+    t_critical = stats.t.ppf((1 + confidence) / 2, df)
+    
+    ci_margin = t_critical * sem
+    ci_lower = mean - ci_margin
+    ci_upper = mean + ci_margin
+    
+    return mean, ci_lower, ci_upper, ci_margin
+
+# ============================================================================
 # Configuration
 # ============================================================================
 
@@ -648,16 +690,25 @@ def compute_mode_averaged_frequency_response(results: List[Dict]) -> Dict:
         lti_freq_response[s_idx, :] = result['G_lti'].mean(axis=1)
         tv_freq_response[s_idx, :] = result['G_tv_mean'].mean(axis=1)
     
+    # Compute 95% confidence intervals
+    lti_mean, lti_ci_lower, lti_ci_upper, lti_ci_margin = compute_confidence_interval(lti_freq_response, axis=0)
+    tv_mean, tv_ci_lower, tv_ci_upper, tv_ci_margin = compute_confidence_interval(tv_freq_response, axis=0)
+    
     return {
         'freqs_hz': results[0]['freqs_hz'],
-        'lti_mean': lti_freq_response.mean(axis=0),
+        'lti_mean': lti_mean,
         'lti_std': lti_freq_response.std(axis=0),
-        'lti_sem': lti_freq_response.std(axis=0) / np.sqrt(n_subjects),
-        'tv_mean': tv_freq_response.mean(axis=0),
+        'lti_ci_lower': lti_ci_lower,
+        'lti_ci_upper': lti_ci_upper,
+        'lti_ci_margin': lti_ci_margin,
+        'tv_mean': tv_mean,
         'tv_std': tv_freq_response.std(axis=0),
-        'tv_sem': tv_freq_response.std(axis=0) / np.sqrt(n_subjects),
+        'tv_ci_lower': tv_ci_lower,
+        'tv_ci_upper': tv_ci_upper,
+        'tv_ci_margin': tv_ci_margin,
         'lti_individual': lti_freq_response,
-        'tv_individual': tv_freq_response
+        'tv_individual': tv_freq_response,
+        'n_subjects': n_subjects
     }
 
 def compute_frequency_band_statistics(ad_results: List[Dict], hc_results: List[Dict]) -> pd.DataFrame:
@@ -1012,19 +1063,19 @@ def plot_mode_averaged_frequency_responses(ad_results: List[Dict], hc_results: L
     for band_name, (f_low, f_high) in bands.items():
         ax1.axvspan(f_low, f_high, alpha=0.15, color=colors_bands[band_name], zorder=0)
     
-    # Plot data
+    # Plot data with 95% CI
     line_ad = ax1.plot(freqs_hz, ad_freq['lti_mean'], color=color_ad, linewidth=3, 
                        label=f'AD (n={len(ad_results)})', alpha=0.9, zorder=3)[0]
     fill_ad = ax1.fill_between(freqs_hz, 
-                     ad_freq['lti_mean'] - ad_freq['lti_sem'],
-                     ad_freq['lti_mean'] + ad_freq['lti_sem'],
+                     ad_freq['lti_ci_lower'],
+                     ad_freq['lti_ci_upper'],
                      color=color_ad, alpha=0.25, zorder=2)
     
     line_hc = ax1.plot(freqs_hz, hc_freq['lti_mean'], color=color_hc, linewidth=3, 
                        label=f'HC (n={len(hc_results)})', alpha=0.9, zorder=3)[0]
     fill_hc = ax1.fill_between(freqs_hz,
-                     hc_freq['lti_mean'] - hc_freq['lti_sem'],
-                     hc_freq['lti_mean'] + hc_freq['lti_sem'],
+                     hc_freq['lti_ci_lower'],
+                     hc_freq['lti_ci_upper'],
                      color=color_hc, alpha=0.25, zorder=2)
     
     # Add band labels at top
@@ -1054,11 +1105,11 @@ def plot_mode_averaged_frequency_responses(ad_results: List[Dict], hc_results: L
     ax1.set_title('(A) LTI Model: Mode-Averaged Frequency Response', 
                   fontsize=14, fontweight='bold', loc='left')
     
-    # Enhanced legend
+    # Enhanced legend with 95% CI
     handles = [line_ad, mpatches.Patch(color=color_ad, alpha=0.25),
                line_hc, mpatches.Patch(color=color_hc, alpha=0.25)]
-    labels = [f'AD Mean (n={len(ad_results)})', 'AD ±SEM',
-              f'HC Mean (n={len(hc_results)})', 'HC ±SEM']
+    labels = [f'AD Mean (n={len(ad_results)})', 'AD 95% CI',
+              f'HC Mean (n={len(hc_results)})', 'HC 95% CI']
     ax1.legend(handles, labels, loc='upper right', fontsize=10, framealpha=0.95,
                edgecolor='black', fancybox=True)
     
@@ -1081,21 +1132,21 @@ def plot_mode_averaged_frequency_responses(ad_results: List[Dict], hc_results: L
     for band_name, (f_low, f_high) in bands.items():
         ax2.axvspan(f_low, f_high, alpha=0.15, color=colors_bands[band_name], zorder=0)
     
-    # Plot data
+    # Plot data with 95% CI
     line_ad_tv = ax2.plot(freqs_hz, ad_freq['tv_mean'], color=color_ad, linewidth=3,
                           linestyle='--', label=f'AD (n={len(ad_results)})', 
                           alpha=0.9, zorder=3)[0]
     ax2.fill_between(freqs_hz,
-                     ad_freq['tv_mean'] - ad_freq['tv_sem'],
-                     ad_freq['tv_mean'] + ad_freq['tv_sem'],
+                     ad_freq['tv_ci_lower'],
+                     ad_freq['tv_ci_upper'],
                      color=color_ad, alpha=0.25, zorder=2)
     
     line_hc_tv = ax2.plot(freqs_hz, hc_freq['tv_mean'], color=color_hc, linewidth=3,
                           linestyle='--', label=f'HC (n={len(hc_results)})', 
                           alpha=0.9, zorder=3)[0]
     ax2.fill_between(freqs_hz,
-                     hc_freq['tv_mean'] - hc_freq['tv_sem'],
-                     hc_freq['tv_mean'] + hc_freq['tv_sem'],
+                     hc_freq['tv_ci_lower'],
+                     hc_freq['tv_ci_upper'],
                      color=color_hc, alpha=0.25, zorder=2)
     
     # Add band labels
@@ -1123,11 +1174,11 @@ def plot_mode_averaged_frequency_responses(ad_results: List[Dict], hc_results: L
     ax2.set_title('(B) Time-Varying Model: Mode-Averaged Frequency Response', 
                   fontsize=14, fontweight='bold', loc='left')
     
-    # Enhanced legend
+    # Enhanced legend with 95% CI
     handles = [line_ad_tv, mpatches.Patch(color=color_ad, alpha=0.25),
                line_hc_tv, mpatches.Patch(color=color_hc, alpha=0.25)]
-    labels = [f'AD Mean (n={len(ad_results)})', 'AD ±SEM',
-              f'HC Mean (n={len(hc_results)})', 'HC ±SEM']
+    labels = [f'AD Mean (n={len(ad_results)})', 'AD 95% CI',
+              f'HC Mean (n={len(hc_results)})', 'HC 95% CI']
     ax2.legend(handles, labels, loc='upper right', fontsize=10, framealpha=0.95,
                edgecolor='black', fancybox=True)
     
