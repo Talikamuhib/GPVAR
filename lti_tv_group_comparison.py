@@ -114,9 +114,9 @@ TARGET_SFREQ = 100.0
 # Model settings
 RIDGE_LAMBDA = 5e-3
 
-# Fixed model parameters (NO model selection)
-FIXED_P = 30
-FIXED_K = 4
+# Model selection ranges (for thesis analysis)
+P_RANGE = [1, 2, 3, 5, 7, 10, 15, 20, 30]
+K_RANGE = [1, 2, 3, 4]
 
 # Time-varying analysis
 WINDOW_LENGTH_SEC = 10.0
@@ -348,8 +348,11 @@ class GPVAR_SharedH:
 
 def find_best_model(X: np.ndarray, L_norm: np.ndarray, 
                     P_range: List[int] = P_RANGE,
-                    K_range: List[int] = K_RANGE) -> Tuple[int, int]:
-    """Find best P and K using BIC."""
+                    K_range: List[int] = K_RANGE) -> Dict:
+    """
+    Find best P and K using BIC.
+    Returns detailed model selection results for thesis analysis.
+    """
     T = X.shape[1]
     T_train = int(0.70 * T)
     T_val = int(0.85 * T)
@@ -363,6 +366,9 @@ def find_best_model(X: np.ndarray, L_norm: np.ndarray,
     best_bic = np.inf
     best_P, best_K = None, None
     
+    # Store all model selection results
+    model_selection_results = []
+    
     for K in K_range:
         for P in P_range:
             try:
@@ -370,23 +376,49 @@ def find_best_model(X: np.ndarray, L_norm: np.ndarray,
                 m.fit(X_train)
                 
                 rho = m.spectral_radius()
-                if not np.isfinite(rho) or rho >= 0.99:
-                    continue
+                stable = np.isfinite(rho) and rho < 0.99
                 
                 metrics = m.evaluate(X_val)
                 
-                if metrics['BIC'] < best_bic:
+                model_selection_results.append({
+                    'P': P,
+                    'K': K,
+                    'BIC': metrics['BIC'],
+                    'R2': metrics['R2'],
+                    'MSE': metrics['MSE'],
+                    'rho': rho,
+                    'stable': stable,
+                    'success': True
+                })
+                
+                if stable and metrics['BIC'] < best_bic:
                     best_bic = metrics['BIC']
                     best_P = P
                     best_K = K
             
-            except Exception:
+            except Exception as e:
+                model_selection_results.append({
+                    'P': P,
+                    'K': K,
+                    'BIC': np.nan,
+                    'R2': np.nan,
+                    'MSE': np.nan,
+                    'rho': np.nan,
+                    'stable': False,
+                    'success': False
+                })
                 continue
     
     if best_P is None:
         best_P, best_K = 5, 2
+        print(f"    WARNING: All models failed or unstable, using fallback P={best_P}, K={best_K}")
     
-    return best_P, best_K
+    return {
+        'best_P': best_P,
+        'best_K': best_K,
+        'best_BIC': best_bic,
+        'model_selection_table': pd.DataFrame(model_selection_results)
+    }
 
 def split_into_windows(X: np.ndarray, window_length_sec: float, 
                        overlap: float, fs: float) -> List[Tuple[int, int, np.ndarray]]:
@@ -466,8 +498,10 @@ def analyze_single_subject(filepath: str, L_norm: np.ndarray, subject_id: str = 
         # Standardize
         X_std = safe_zscore(X, X)
         
-        # Model selection
-        best_P, best_K = find_best_model(X, L_norm)
+        # Model selection (returns detailed results for thesis)
+        model_selection = find_best_model(X, L_norm)
+        best_P = model_selection['best_P']
+        best_K = model_selection['best_K']
         
         # Fit LTI
         lti_model = GPVAR_SharedH(P=best_P, K=best_K, L_norm=L_norm)
@@ -518,6 +552,8 @@ def analyze_single_subject(filepath: str, L_norm: np.ndarray, subject_id: str = 
             'duration': n_samples / TARGET_SFREQ,
             'best_P': best_P,
             'best_K': best_K,
+            'best_BIC': model_selection['best_BIC'],
+            'model_selection_table': model_selection['model_selection_table'],
             'lti_model': lti_model,
             'lti_metrics': lti_metrics,
             'lti_rho': lti_rho,
@@ -614,6 +650,187 @@ def compute_group_statistics(ad_results: List[Dict], hc_results: List[Dict]) -> 
     
     df = pd.DataFrame(stats_data)
     return df
+
+# ============================================================================
+# Model Selection Analysis (for thesis)
+# ============================================================================
+
+def save_model_selection_results(ad_results: List[Dict], hc_results: List[Dict], save_dir: Path):
+    """Save detailed model selection results for each subject."""
+    
+    print("\nSaving model selection results for thesis analysis...")
+    
+    # Create directory for model selection
+    ms_dir = save_dir / "model_selection"
+    ms_dir.mkdir(exist_ok=True)
+    
+    # Save individual subject model selection tables
+    for result in ad_results:
+        subject_id = result['subject_id']
+        ms_table = result['model_selection_table']
+        ms_table['subject_id'] = subject_id
+        ms_table['group'] = 'AD'
+        csv_path = ms_dir / f"{subject_id}_model_selection.csv"
+        ms_table.to_csv(csv_path, index=False)
+    
+    for result in hc_results:
+        subject_id = result['subject_id']
+        ms_table = result['model_selection_table']
+        ms_table['subject_id'] = subject_id
+        ms_table['group'] = 'HC'
+        csv_path = ms_dir / f"{subject_id}_model_selection.csv"
+        ms_table.to_csv(csv_path, index=False)
+    
+    # Combine all model selection results
+    all_ms_tables = []
+    for result in ad_results + hc_results:
+        ms_table = result['model_selection_table'].copy()
+        ms_table['subject_id'] = result['subject_id']
+        ms_table['group'] = 'AD' if result in ad_results else 'HC'
+        all_ms_tables.append(ms_table)
+    
+    combined_ms = pd.concat(all_ms_tables, ignore_index=True)
+    combined_csv = ms_dir / "all_subjects_model_selection.csv"
+    combined_ms.to_csv(combined_csv, index=False)
+    print(f"  Saved: {combined_csv}")
+    
+    # Summary of selected models
+    model_summary = []
+    for result in ad_results:
+        model_summary.append({
+            'subject_id': result['subject_id'],
+            'group': 'AD',
+            'selected_P': result['best_P'],
+            'selected_K': result['best_K'],
+            'selected_BIC': result['best_BIC']
+        })
+    
+    for result in hc_results:
+        model_summary.append({
+            'subject_id': result['subject_id'],
+            'group': 'HC',
+            'selected_P': result['best_P'],
+            'selected_K': result['best_K'],
+            'selected_BIC': result['best_BIC']
+        })
+    
+    summary_df = pd.DataFrame(model_summary)
+    summary_csv = save_dir / "model_selection_summary.csv"
+    summary_df.to_csv(summary_csv, index=False)
+    print(f"  Saved: {summary_csv}")
+    
+    return summary_df
+
+def plot_model_selection_analysis(ad_results: List[Dict], hc_results: List[Dict], save_dir: Path):
+    """Create visualizations of model selection for thesis."""
+    
+    print("\nCreating model selection visualizations...")
+    
+    fig, axes = plt.subplots(2, 3, figsize=(18, 12))
+    
+    # Extract selected P and K values
+    ad_P = [r['best_P'] for r in ad_results]
+    hc_P = [r['best_P'] for r in hc_results]
+    ad_K = [r['best_K'] for r in ad_results]
+    hc_K = [r['best_K'] for r in hc_results]
+    
+    # Plot 1: P distribution
+    ax = axes[0, 0]
+    bins = np.arange(0.5, max(max(ad_P), max(hc_P)) + 1.5, 1)
+    ax.hist(ad_P, bins=bins, alpha=0.6, color='red', label='AD', edgecolor='black')
+    ax.hist(hc_P, bins=bins, alpha=0.6, color='blue', label='HC', edgecolor='black')
+    ax.set_xlabel('Selected P (AR Order)')
+    ax.set_ylabel('Frequency')
+    ax.set_title('Distribution of Selected P Values', fontweight='bold')
+    ax.legend()
+    ax.grid(True, alpha=0.3)
+    
+    # Plot 2: K distribution
+    ax = axes[0, 1]
+    bins = np.arange(0.5, max(max(ad_K), max(hc_K)) + 1.5, 1)
+    ax.hist(ad_K, bins=bins, alpha=0.6, color='red', label='AD', edgecolor='black')
+    ax.hist(hc_K, bins=bins, alpha=0.6, color='blue', label='HC', edgecolor='black')
+    ax.set_xlabel('Selected K (Graph Filter Order)')
+    ax.set_ylabel('Frequency')
+    ax.set_title('Distribution of Selected K Values', fontweight='bold')
+    ax.legend()
+    ax.grid(True, alpha=0.3)
+    
+    # Plot 3: P vs K scatter
+    ax = axes[0, 2]
+    ax.scatter(ad_P, ad_K, s=100, alpha=0.6, color='red', label='AD', edgecolors='black')
+    ax.scatter(hc_P, hc_K, s=100, alpha=0.6, color='blue', label='HC', edgecolors='black')
+    ax.set_xlabel('Selected P')
+    ax.set_ylabel('Selected K')
+    ax.set_title('P vs K Selection', fontweight='bold')
+    ax.legend()
+    ax.grid(True, alpha=0.3)
+    
+    # Plot 4: P comparison boxplot
+    ax = axes[1, 0]
+    bp = ax.boxplot([ad_P, hc_P], labels=['AD', 'HC'], patch_artist=True, showmeans=True)
+    bp['boxes'][0].set_facecolor('lightcoral')
+    bp['boxes'][1].set_facecolor('lightblue')
+    ax.set_ylabel('Selected P')
+    ax.set_title('P Selection by Group', fontweight='bold')
+    ax.grid(True, alpha=0.3)
+    
+    # Add statistics
+    t_stat_P, p_val_P = stats.ttest_ind(ad_P, hc_P)
+    ax.text(0.5, 0.95, f'p={p_val_P:.3f}', transform=ax.transAxes, 
+            ha='center', va='top', fontsize=10, fontweight='bold',
+            bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.5))
+    
+    # Plot 5: K comparison boxplot
+    ax = axes[1, 1]
+    bp = ax.boxplot([ad_K, hc_K], labels=['AD', 'HC'], patch_artist=True, showmeans=True)
+    bp['boxes'][0].set_facecolor('lightcoral')
+    bp['boxes'][1].set_facecolor('lightblue')
+    ax.set_ylabel('Selected K')
+    ax.set_title('K Selection by Group', fontweight='bold')
+    ax.grid(True, alpha=0.3)
+    
+    # Add statistics
+    t_stat_K, p_val_K = stats.ttest_ind(ad_K, hc_K)
+    ax.text(0.5, 0.95, f'p={p_val_K:.3f}', transform=ax.transAxes,
+            ha='center', va='top', fontsize=10, fontweight='bold',
+            bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.5))
+    
+    # Plot 6: Summary statistics table
+    ax = axes[1, 2]
+    ax.axis('off')
+    
+    summary_text = [
+        "Model Selection Summary",
+        "=" * 40,
+        f"AD Group (n={len(ad_P)})",
+        f"  P: {np.mean(ad_P):.1f} ± {np.std(ad_P):.1f}",
+        f"  K: {np.mean(ad_K):.1f} ± {np.std(ad_K):.1f}",
+        f"  Mode P: {stats.mode(ad_P, keepdims=True)[0][0]}",
+        f"  Mode K: {stats.mode(ad_K, keepdims=True)[0][0]}",
+        "",
+        f"HC Group (n={len(hc_P)})",
+        f"  P: {np.mean(hc_P):.1f} ± {np.std(hc_P):.1f}",
+        f"  K: {np.mean(hc_K):.1f} ± {np.std(hc_K):.1f}",
+        f"  Mode P: {stats.mode(hc_P, keepdims=True)[0][0]}",
+        f"  Mode K: {stats.mode(hc_K, keepdims=True)[0][0]}",
+        "",
+        "Statistical Tests",
+        f"  P difference: p={p_val_P:.4f}",
+        f"  K difference: p={p_val_K:.4f}",
+    ]
+    
+    ax.text(0.1, 0.95, '\n'.join(summary_text), transform=ax.transAxes,
+            fontsize=10, verticalalignment='top', fontfamily='monospace',
+            bbox=dict(boxstyle='round', facecolor='lightgray', alpha=0.8))
+    
+    plt.suptitle('Model Selection Analysis: AD vs HC', fontsize=16, fontweight='bold')
+    plt.tight_layout()
+    
+    savepath = save_dir / 'model_selection_analysis.png'
+    plt.savefig(savepath, dpi=150, bbox_inches='tight')
+    plt.close()
+    print(f"  Saved: {savepath}")
 
 # ============================================================================
 # Visualization
@@ -847,6 +1064,20 @@ def main():
     stats_df.to_csv(stats_csv, index=False)
     print(f"\nSaved statistics: {stats_csv}")
     
+    # Model selection analysis (for thesis)
+    print("\n" + "="*80)
+    print("MODEL SELECTION ANALYSIS")
+    print("="*80)
+    model_summary_df = save_model_selection_results(ad_results, hc_results, OUT_DIR)
+    plot_model_selection_analysis(ad_results, hc_results, OUT_DIR)
+    
+    # Print model selection summary
+    print("\nModel Selection Summary:")
+    print(f"  AD: P={model_summary_df[model_summary_df['group']=='AD']['selected_P'].mean():.1f}±{model_summary_df[model_summary_df['group']=='AD']['selected_P'].std():.1f}, "
+          f"K={model_summary_df[model_summary_df['group']=='AD']['selected_K'].mean():.1f}±{model_summary_df[model_summary_df['group']=='AD']['selected_K'].std():.1f}")
+    print(f"  HC: P={model_summary_df[model_summary_df['group']=='HC']['selected_P'].mean():.1f}±{model_summary_df[model_summary_df['group']=='HC']['selected_P'].std():.1f}, "
+          f"K={model_summary_df[model_summary_df['group']=='HC']['selected_K'].mean():.1f}±{model_summary_df[model_summary_df['group']=='HC']['selected_K'].std():.1f}")
+    
     # Visualizations
     plot_group_comparison(ad_results, hc_results, stats_df, OUT_DIR)
     
@@ -861,11 +1092,14 @@ def main():
             'duration': r['duration'],
             'best_P': r['best_P'],
             'best_K': r['best_K'],
+            'best_BIC': r['best_BIC'],
             'lti_R2': r['lti_R2'],
             'lti_rho': r['lti_rho'],
             'lti_BIC': r['lti_BIC'],
             'tv_R2_mean': r['tv_R2_mean'],
+            'tv_R2_std': r['tv_R2_std'],
             'tv_rho_mean': r['tv_rho_mean'],
+            'tv_rho_std': r['tv_rho_std'],
             'n_windows': r['n_windows'],
             'mean_msd': r['mean_msd'],
             'mean_cv': r['mean_cv'],
@@ -879,11 +1113,14 @@ def main():
             'duration': r['duration'],
             'best_P': r['best_P'],
             'best_K': r['best_K'],
+            'best_BIC': r['best_BIC'],
             'lti_R2': r['lti_R2'],
             'lti_rho': r['lti_rho'],
             'lti_BIC': r['lti_BIC'],
             'tv_R2_mean': r['tv_R2_mean'],
+            'tv_R2_std': r['tv_R2_std'],
             'tv_rho_mean': r['tv_rho_mean'],
+            'tv_rho_std': r['tv_rho_std'],
             'n_windows': r['n_windows'],
             'mean_msd': r['mean_msd'],
             'mean_cv': r['mean_cv'],
