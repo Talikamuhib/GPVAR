@@ -100,6 +100,51 @@ Shows:
 - Row 2: TV transfer functions (AD, HC, difference)
 - Row 3: Aggregate analyses (frequency response, graph mode response, time-varying dynamics)
 
+#### 7. Mode-Averaged Frequency Responses ⭐ NEW
+
+**File**: `mode_averaged_frequency_responses.png`
+
+This is a KEY figure for thesis showing:
+- **Row 1**: LTI frequency response averaged over all graph modes
+  - AD vs HC comparison with standard error bars
+  - Frequency bands highlighted (Delta, Theta, Alpha, Beta, Gamma)
+- **Row 2**: TV frequency response averaged over all graph modes
+  - Shows time-varying dynamics in frequency domain
+- **Row 3**: 
+  - LTI difference plot (AD - HC)
+  - TV difference plot (AD - HC)
+  - Statistical table with p-values per frequency band
+
+**Interpretation**: Shows which temporal frequencies (Hz) are amplified/suppressed differently between groups, independent of spatial patterns.
+
+#### 8. Individual Subject Frequency Responses
+
+**File**: `individual_frequency_responses.png`
+
+"Spaghetti plots" showing:
+- All individual subject traces (thin lines)
+- Group mean (thick line)
+- Separate panels for AD/HC and LTI/TV
+- Shows inter-subject variability
+
+#### 9. Frequency Band Statistics
+
+**File**: `frequency_band_statistics.csv`
+
+Statistical comparisons for standard EEG bands:
+- **Delta** (0.5-4 Hz): Slow waves, sleep, pathology
+- **Theta** (4-8 Hz): Memory, drowsiness
+- **Alpha** (8-13 Hz): Relaxed wakefulness, eyes closed
+- **Beta** (13-30 Hz): Active thinking, focus
+- **Gamma** (30-40 Hz): Cognitive processing
+
+For each band:
+- Mean magnitude (AD vs HC)
+- t-statistic, p-value, Cohen's d
+- Separate statistics for LTI and TV models
+
+**Use for thesis**: Report specific frequency bands showing group differences
+
 ## Thesis Presentation Suggestions
 
 ### Model Selection Section
@@ -127,6 +172,30 @@ HC    | XX | X.X ± X.X    | X.X ± X.X    |   X    |   X    | p=X.XXX
    OR
    "AD patients showed significantly higher/lower model complexity (P: p=X.XX, d=X.XX)"
 
+### Mode-Averaged Frequency Response Section ⭐ NEW
+
+**Figure Caption**:
+"Mode-averaged frequency response |G(ω)| showing transfer function magnitude averaged over all graph modes (λ) for each temporal frequency. (A) LTI model comparison between AD and HC with shaded frequency bands. (B) Time-varying (TV) model comparison. (C-D) Difference plots highlighting frequencies where AD shows higher/lower response magnitude than HC. (E) Statistical comparison table showing p-values and effect sizes for standard EEG frequency bands."
+
+**Reporting frequency band results** (use `frequency_band_statistics.csv`):
+
+Example template:
+```
+Analysis of mode-averaged frequency responses revealed significant group 
+differences in multiple frequency bands. In the LTI model, AD patients 
+showed [increased/decreased] transfer function magnitude in the 
+[delta/theta/alpha/beta/gamma] band (AD: X.XX±X.XX, HC: X.XX±X.XX, 
+p=X.XXX, d=X.XX). Similar patterns were observed in the TV model for 
+[band names] (p=X.XXX, d=X.XX).
+```
+
+**Interpretation examples**:
+- **Higher delta/theta in AD**: "Elevated low-frequency amplification suggests increased slow-wave activity, consistent with cortical slowing in neurodegeneration"
+- **Lower alpha in AD**: "Reduced alpha band response indicates disrupted thalamocortical rhythms"
+- **Higher beta in AD**: "Increased beta activity may reflect compensatory mechanisms or hyperexcitability"
+
+**Key advantage**: Mode-averaging removes spatial complexity, revealing pure frequency-domain differences independent of which brain regions or connectivity patterns are involved.
+
 ### Statistical Comparison
 
 Use `group_statistics.csv` to report:
@@ -152,16 +221,22 @@ python lti_tv_group_comparison.py
 ```
 ./group_comparison_lti_tv_analysis/
 ├── model_selection/
-│   ├── sub-30001_model_selection.csv
+│   ├── sub-30001_model_selection.csv      # Individual model selection tables
 │   ├── sub-30002_model_selection.csv
 │   ├── ...
-│   └── all_subjects_model_selection.csv
-├── model_selection_summary.csv
-├── model_selection_analysis.png
-├── all_subjects_results.csv
-├── group_statistics.csv
-├── group_comparison_metrics.png
-└── group_comparison_transfer_functions.png
+│   └── all_subjects_model_selection.csv   # Combined all subjects
+│
+├── model_selection_summary.csv            # Selected P and K per subject
+├── model_selection_analysis.png           # 6-panel model selection visualization
+│
+├── all_subjects_results.csv               # Main results table (all metrics)
+├── group_statistics.csv                   # Statistical tests (overall metrics)
+├── frequency_band_statistics.csv          # Statistical tests per frequency band ⭐ NEW
+│
+├── group_comparison_metrics.png           # Boxplots of all metrics
+├── group_comparison_transfer_functions.png  # Full transfer function analysis
+├── mode_averaged_frequency_responses.png  # Mode-averaged freq. response ⭐ NEW
+└── individual_frequency_responses.png     # Spaghetti plots ⭐ NEW
 ```
 
 ## Key Differences: LTI vs TV

@@ -612,6 +612,103 @@ def process_group(filepaths: List[str], group_name: str, L_norm: np.ndarray) -> 
 # Statistical Comparisons
 # ============================================================================
 
+def compute_mode_averaged_frequency_response(results: List[Dict]) -> Dict:
+    """
+    Compute mean transfer function magnitude averaged over graph modes (λ).
+    Returns frequency responses for LTI and TV models.
+    """
+    n_subjects = len(results)
+    n_freqs = len(results[0]['freqs_hz'])
+    
+    # Initialize arrays
+    lti_freq_response = np.zeros((n_subjects, n_freqs))
+    tv_freq_response = np.zeros((n_subjects, n_freqs))
+    
+    for s_idx, result in enumerate(results):
+        # Average over graph modes (axis=1) for each frequency
+        lti_freq_response[s_idx, :] = result['G_lti'].mean(axis=1)
+        tv_freq_response[s_idx, :] = result['G_tv_mean'].mean(axis=1)
+    
+    return {
+        'freqs_hz': results[0]['freqs_hz'],
+        'lti_mean': lti_freq_response.mean(axis=0),
+        'lti_std': lti_freq_response.std(axis=0),
+        'lti_sem': lti_freq_response.std(axis=0) / np.sqrt(n_subjects),
+        'tv_mean': tv_freq_response.mean(axis=0),
+        'tv_std': tv_freq_response.std(axis=0),
+        'tv_sem': tv_freq_response.std(axis=0) / np.sqrt(n_subjects),
+        'lti_individual': lti_freq_response,
+        'tv_individual': tv_freq_response
+    }
+
+def compute_frequency_band_statistics(ad_results: List[Dict], hc_results: List[Dict]) -> pd.DataFrame:
+    """
+    Compute statistics for standard EEG frequency bands.
+    Bands: Delta (0.5-4 Hz), Theta (4-8 Hz), Alpha (8-13 Hz), 
+           Beta (13-30 Hz), Gamma (30-40 Hz)
+    """
+    # Define frequency bands
+    bands = {
+        'delta': (0.5, 4.0),
+        'theta': (4.0, 8.0),
+        'alpha': (8.0, 13.0),
+        'beta': (13.0, 30.0),
+        'gamma': (30.0, 40.0)
+    }
+    
+    freqs_hz = ad_results[0]['freqs_hz']
+    
+    band_stats = []
+    
+    for band_name, (f_low, f_high) in bands.items():
+        # Find frequency indices for this band
+        band_mask = (freqs_hz >= f_low) & (freqs_hz <= f_high)
+        
+        # Extract mean magnitude in this band for each subject
+        ad_lti_band = np.array([r['G_lti'][:, band_mask].mean() for r in ad_results])
+        hc_lti_band = np.array([r['G_lti'][:, band_mask].mean() for r in hc_results])
+        
+        ad_tv_band = np.array([r['G_tv_mean'][:, band_mask].mean() for r in ad_results])
+        hc_tv_band = np.array([r['G_tv_mean'][:, band_mask].mean() for r in hc_results])
+        
+        # LTI statistics
+        t_lti, p_lti = stats.ttest_ind(ad_lti_band, hc_lti_band, equal_var=False)
+        d_lti = (ad_lti_band.mean() - hc_lti_band.mean()) / np.sqrt((ad_lti_band.std()**2 + hc_lti_band.std()**2) / 2)
+        
+        # TV statistics
+        t_tv, p_tv = stats.ttest_ind(ad_tv_band, hc_tv_band, equal_var=False)
+        d_tv = (ad_tv_band.mean() - hc_tv_band.mean()) / np.sqrt((ad_tv_band.std()**2 + hc_tv_band.std()**2) / 2)
+        
+        band_stats.append({
+            'band': band_name,
+            'freq_range': f'{f_low}-{f_high} Hz',
+            'model_type': 'LTI',
+            'AD_mean': ad_lti_band.mean(),
+            'AD_std': ad_lti_band.std(),
+            'HC_mean': hc_lti_band.mean(),
+            'HC_std': hc_lti_band.std(),
+            't_statistic': t_lti,
+            'p_value': p_lti,
+            'cohens_d': d_lti,
+            'significant': p_lti < 0.05
+        })
+        
+        band_stats.append({
+            'band': band_name,
+            'freq_range': f'{f_low}-{f_high} Hz',
+            'model_type': 'TV',
+            'AD_mean': ad_tv_band.mean(),
+            'AD_std': ad_tv_band.std(),
+            'HC_mean': hc_tv_band.mean(),
+            'HC_std': hc_tv_band.std(),
+            't_statistic': t_tv,
+            'p_value': p_tv,
+            'cohens_d': d_tv,
+            'significant': p_tv < 0.05
+        })
+    
+    return pd.DataFrame(band_stats)
+
 def compute_group_statistics(ad_results: List[Dict], hc_results: List[Dict]) -> pd.DataFrame:
     """Compute statistical comparisons between groups."""
     
@@ -831,6 +928,219 @@ def plot_model_selection_analysis(ad_results: List[Dict], hc_results: List[Dict]
     plt.savefig(savepath, dpi=150, bbox_inches='tight')
     plt.close()
     print(f"  Saved: {savepath}")
+
+def plot_mode_averaged_frequency_responses(ad_results: List[Dict], hc_results: List[Dict], 
+                                           band_stats_df: pd.DataFrame, save_dir: Path):
+    """
+    Create comprehensive plots of mode-averaged frequency responses.
+    Shows transfer function magnitude averaged over all graph modes.
+    """
+    print("\nCreating mode-averaged frequency response plots...")
+    
+    # Compute mode-averaged responses
+    ad_freq = compute_mode_averaged_frequency_response(ad_results)
+    hc_freq = compute_mode_averaged_frequency_response(hc_results)
+    
+    freqs_hz = ad_freq['freqs_hz']
+    
+    # Create comprehensive figure
+    fig = plt.figure(figsize=(20, 12))
+    gs = GridSpec(3, 3, figure=fig, hspace=0.35, wspace=0.3)
+    
+    # =================================================================
+    # Row 1: LTI and TV Mode-Averaged Responses
+    # =================================================================
+    
+    # Plot 1: LTI mode-averaged frequency response
+    ax1 = fig.add_subplot(gs[0, :])
+    ax1.plot(freqs_hz, ad_freq['lti_mean'], 'r-', linewidth=2.5, label='AD LTI', alpha=0.9)
+    ax1.fill_between(freqs_hz, 
+                     ad_freq['lti_mean'] - ad_freq['lti_sem'],
+                     ad_freq['lti_mean'] + ad_freq['lti_sem'],
+                     color='red', alpha=0.2, label='AD ±SEM')
+    
+    ax1.plot(freqs_hz, hc_freq['lti_mean'], 'b-', linewidth=2.5, label='HC LTI', alpha=0.9)
+    ax1.fill_between(freqs_hz,
+                     hc_freq['lti_mean'] - hc_freq['lti_sem'],
+                     hc_freq['lti_mean'] + hc_freq['lti_sem'],
+                     color='blue', alpha=0.2, label='HC ±SEM')
+    
+    # Add frequency band shading
+    bands = {'Delta': (0.5, 4), 'Theta': (4, 8), 'Alpha': (8, 13), 
+             'Beta': (13, 30), 'Gamma': (30, 40)}
+    colors_bands = {'Delta': 'gray', 'Theta': 'lightblue', 'Alpha': 'lightgreen',
+                    'Beta': 'lightyellow', 'Gamma': 'lightcoral'}
+    
+    y_min, y_max = ax1.get_ylim()
+    for band_name, (f_low, f_high) in bands.items():
+        ax1.axvspan(f_low, f_high, alpha=0.1, color=colors_bands[band_name])
+        ax1.text((f_low + f_high) / 2, y_max * 0.95, band_name, 
+                ha='center', va='top', fontsize=9, fontweight='bold')
+    
+    ax1.set_xlabel('Frequency (Hz)', fontsize=12)
+    ax1.set_ylabel('|G(ω)| (averaged over λ)', fontsize=12)
+    ax1.set_title('LTI: Mode-Averaged Frequency Response', fontsize=14, fontweight='bold')
+    ax1.legend(loc='upper right', fontsize=10)
+    ax1.grid(True, alpha=0.3)
+    ax1.set_xlim([freqs_hz.min(), freqs_hz.max()])
+    
+    # Plot 2: TV mode-averaged frequency response
+    ax2 = fig.add_subplot(gs[1, :])
+    ax2.plot(freqs_hz, ad_freq['tv_mean'], 'r--', linewidth=2.5, label='AD TV', alpha=0.9)
+    ax2.fill_between(freqs_hz,
+                     ad_freq['tv_mean'] - ad_freq['tv_sem'],
+                     ad_freq['tv_mean'] + ad_freq['tv_sem'],
+                     color='red', alpha=0.2, label='AD ±SEM')
+    
+    ax2.plot(freqs_hz, hc_freq['tv_mean'], 'b--', linewidth=2.5, label='HC TV', alpha=0.9)
+    ax2.fill_between(freqs_hz,
+                     hc_freq['tv_mean'] - hc_freq['tv_sem'],
+                     hc_freq['tv_mean'] + hc_freq['tv_sem'],
+                     color='blue', alpha=0.2, label='HC ±SEM')
+    
+    # Add frequency band shading
+    y_min, y_max = ax2.get_ylim()
+    for band_name, (f_low, f_high) in bands.items():
+        ax2.axvspan(f_low, f_high, alpha=0.1, color=colors_bands[band_name])
+        ax2.text((f_low + f_high) / 2, y_max * 0.95, band_name,
+                ha='center', va='top', fontsize=9, fontweight='bold')
+    
+    ax2.set_xlabel('Frequency (Hz)', fontsize=12)
+    ax2.set_ylabel('|G(ω)| (averaged over λ)', fontsize=12)
+    ax2.set_title('TV: Mode-Averaged Frequency Response', fontsize=14, fontweight='bold')
+    ax2.legend(loc='upper right', fontsize=10)
+    ax2.grid(True, alpha=0.3)
+    ax2.set_xlim([freqs_hz.min(), freqs_hz.max()])
+    
+    # =================================================================
+    # Row 2: Difference plots and frequency band comparisons
+    # =================================================================
+    
+    # Plot 3: LTI difference (AD - HC)
+    ax3 = fig.add_subplot(gs[2, 0])
+    diff_lti = ad_freq['lti_mean'] - hc_freq['lti_mean']
+    ax3.plot(freqs_hz, diff_lti, 'k-', linewidth=2.5)
+    ax3.axhline(0, color='gray', linestyle='--', linewidth=1.5, alpha=0.7)
+    ax3.fill_between(freqs_hz, 0, diff_lti, where=(diff_lti > 0), 
+                     color='red', alpha=0.3, label='AD > HC')
+    ax3.fill_between(freqs_hz, 0, diff_lti, where=(diff_lti < 0),
+                     color='blue', alpha=0.3, label='HC > AD')
+    
+    ax3.set_xlabel('Frequency (Hz)', fontsize=10)
+    ax3.set_ylabel('Δ|G| (AD - HC)', fontsize=10)
+    ax3.set_title('LTI Difference', fontsize=12, fontweight='bold')
+    ax3.legend(fontsize=8)
+    ax3.grid(True, alpha=0.3)
+    ax3.set_xlim([freqs_hz.min(), freqs_hz.max()])
+    
+    # Plot 4: TV difference (AD - HC)
+    ax4 = fig.add_subplot(gs[2, 1])
+    diff_tv = ad_freq['tv_mean'] - hc_freq['tv_mean']
+    ax4.plot(freqs_hz, diff_tv, 'k--', linewidth=2.5)
+    ax4.axhline(0, color='gray', linestyle='--', linewidth=1.5, alpha=0.7)
+    ax4.fill_between(freqs_hz, 0, diff_tv, where=(diff_tv > 0),
+                     color='red', alpha=0.3, label='AD > HC')
+    ax4.fill_between(freqs_hz, 0, diff_tv, where=(diff_tv < 0),
+                     color='blue', alpha=0.3, label='HC > AD')
+    
+    ax4.set_xlabel('Frequency (Hz)', fontsize=10)
+    ax4.set_ylabel('Δ|G| (AD - HC)', fontsize=10)
+    ax4.set_title('TV Difference', fontsize=12, fontweight='bold')
+    ax4.legend(fontsize=8)
+    ax4.grid(True, alpha=0.3)
+    ax4.set_xlim([freqs_hz.min(), freqs_hz.max()])
+    
+    # Plot 5: Frequency band statistics table
+    ax5 = fig.add_subplot(gs[2, 2])
+    ax5.axis('off')
+    
+    # Create summary table for LTI bands
+    lti_bands = band_stats_df[band_stats_df['model_type'] == 'LTI'].copy()
+    
+    table_text = ["Frequency Band Statistics (LTI)", "=" * 45]
+    for _, row in lti_bands.iterrows():
+        sig_marker = '***' if row['p_value'] < 0.001 else '**' if row['p_value'] < 0.01 else '*' if row['p_value'] < 0.05 else 'ns'
+        table_text.append(f"{row['band'].upper()} ({row['freq_range']})")
+        table_text.append(f"  AD: {row['AD_mean']:.3f} ± {row['AD_std']:.3f}")
+        table_text.append(f"  HC: {row['HC_mean']:.3f} ± {row['HC_std']:.3f}")
+        table_text.append(f"  p={row['p_value']:.4f} {sig_marker}, d={row['cohens_d']:.2f}")
+        table_text.append("")
+    
+    ax5.text(0.05, 0.95, '\n'.join(table_text), transform=ax5.transAxes,
+            fontsize=8, verticalalignment='top', fontfamily='monospace',
+            bbox=dict(boxstyle='round', facecolor='lightgray', alpha=0.8))
+    
+    plt.suptitle('Mode-Averaged Frequency Responses: AD vs HC', 
+                 fontsize=16, fontweight='bold')
+    plt.tight_layout()
+    
+    savepath = save_dir / 'mode_averaged_frequency_responses.png'
+    plt.savefig(savepath, dpi=150, bbox_inches='tight')
+    plt.close()
+    print(f"  Saved: {savepath}")
+    
+    # =================================================================
+    # Additional figure: Individual subject traces (spaghetti plot)
+    # =================================================================
+    
+    fig2, axes = plt.subplots(2, 2, figsize=(16, 10))
+    
+    # Plot 1: AD LTI individual traces
+    ax = axes[0, 0]
+    for s_idx in range(ad_freq['lti_individual'].shape[0]):
+        ax.plot(freqs_hz, ad_freq['lti_individual'][s_idx, :], 
+               'r-', alpha=0.2, linewidth=0.5)
+    ax.plot(freqs_hz, ad_freq['lti_mean'], 'r-', linewidth=3, label='Group Mean')
+    ax.set_xlabel('Frequency (Hz)')
+    ax.set_ylabel('|G(ω)|')
+    ax.set_title('AD LTI: Individual Subjects', fontweight='bold')
+    ax.legend()
+    ax.grid(True, alpha=0.3)
+    
+    # Plot 2: HC LTI individual traces
+    ax = axes[0, 1]
+    for s_idx in range(hc_freq['lti_individual'].shape[0]):
+        ax.plot(freqs_hz, hc_freq['lti_individual'][s_idx, :],
+               'b-', alpha=0.2, linewidth=0.5)
+    ax.plot(freqs_hz, hc_freq['lti_mean'], 'b-', linewidth=3, label='Group Mean')
+    ax.set_xlabel('Frequency (Hz)')
+    ax.set_ylabel('|G(ω)|')
+    ax.set_title('HC LTI: Individual Subjects', fontweight='bold')
+    ax.legend()
+    ax.grid(True, alpha=0.3)
+    
+    # Plot 3: AD TV individual traces
+    ax = axes[1, 0]
+    for s_idx in range(ad_freq['tv_individual'].shape[0]):
+        ax.plot(freqs_hz, ad_freq['tv_individual'][s_idx, :],
+               'r-', alpha=0.2, linewidth=0.5)
+    ax.plot(freqs_hz, ad_freq['tv_mean'], 'r-', linewidth=3, label='Group Mean')
+    ax.set_xlabel('Frequency (Hz)')
+    ax.set_ylabel('|G(ω)|')
+    ax.set_title('AD TV: Individual Subjects', fontweight='bold')
+    ax.legend()
+    ax.grid(True, alpha=0.3)
+    
+    # Plot 4: HC TV individual traces
+    ax = axes[1, 1]
+    for s_idx in range(hc_freq['tv_individual'].shape[0]):
+        ax.plot(freqs_hz, hc_freq['tv_individual'][s_idx, :],
+               'b-', alpha=0.2, linewidth=0.5)
+    ax.plot(freqs_hz, hc_freq['tv_mean'], 'b-', linewidth=3, label='Group Mean')
+    ax.set_xlabel('Frequency (Hz)')
+    ax.set_ylabel('|G(ω)|')
+    ax.set_title('HC TV: Individual Subjects', fontweight='bold')
+    ax.legend()
+    ax.grid(True, alpha=0.3)
+    
+    plt.suptitle('Individual Subject Frequency Responses (Mode-Averaged)', 
+                 fontsize=16, fontweight='bold')
+    plt.tight_layout()
+    
+    savepath2 = save_dir / 'individual_frequency_responses.png'
+    plt.savefig(savepath2, dpi=150, bbox_inches='tight')
+    plt.close()
+    print(f"  Saved: {savepath2}")
 
 # ============================================================================
 # Visualization
@@ -1064,6 +1374,18 @@ def main():
     stats_df.to_csv(stats_csv, index=False)
     print(f"\nSaved statistics: {stats_csv}")
     
+    # Frequency band analysis (for thesis)
+    print("\n" + "="*80)
+    print("FREQUENCY BAND ANALYSIS")
+    print("="*80)
+    band_stats_df = compute_frequency_band_statistics(ad_results, hc_results)
+    print(band_stats_df.to_string(index=False))
+    
+    # Save frequency band statistics
+    band_stats_csv = OUT_DIR / 'frequency_band_statistics.csv'
+    band_stats_df.to_csv(band_stats_csv, index=False)
+    print(f"\nSaved frequency band statistics: {band_stats_csv}")
+    
     # Model selection analysis (for thesis)
     print("\n" + "="*80)
     print("MODEL SELECTION ANALYSIS")
@@ -1079,7 +1401,11 @@ def main():
           f"K={model_summary_df[model_summary_df['group']=='HC']['selected_K'].mean():.1f}±{model_summary_df[model_summary_df['group']=='HC']['selected_K'].std():.1f}")
     
     # Visualizations
+    print("\n" + "="*80)
+    print("CREATING VISUALIZATIONS")
+    print("="*80)
     plot_group_comparison(ad_results, hc_results, stats_df, OUT_DIR)
+    plot_mode_averaged_frequency_responses(ad_results, hc_results, band_stats_df, OUT_DIR)
     
     # Save individual subject results
     print("\nSaving individual subject results...")
@@ -1137,13 +1463,29 @@ def main():
     print("="*80)
     print(f"AD subjects: {len(ad_results)}/{len(AD_PATHS)} successful")
     print(f"HC subjects: {len(hc_results)}/{len(HC_PATHS)} successful")
-    print(f"\nSignificant differences (p < 0.05):")
+    
+    print(f"\nSignificant differences in overall metrics (p < 0.05):")
     sig_metrics = stats_df[stats_df['significant']]
     if len(sig_metrics) > 0:
         for _, row in sig_metrics.iterrows():
             print(f"  - {row['metric']}: p={row['p_value']:.4f}, d={row['cohens_d']:.3f}")
     else:
         print("  None")
+    
+    print(f"\nSignificant differences in frequency bands (p < 0.05):")
+    sig_bands = band_stats_df[band_stats_df['significant']]
+    if len(sig_bands) > 0:
+        for _, row in sig_bands.iterrows():
+            print(f"  - {row['band'].upper()} ({row['model_type']}): p={row['p_value']:.4f}, d={row['cohens_d']:.3f}")
+    else:
+        print("  None")
+    
+    print(f"\nOutput files generated:")
+    print(f"  - Model selection: {OUT_DIR / 'model_selection/'}")
+    print(f"  - Subject results: {OUT_DIR / 'all_subjects_results.csv'}")
+    print(f"  - Group statistics: {OUT_DIR / 'group_statistics.csv'}")
+    print(f"  - Frequency bands: {OUT_DIR / 'frequency_band_statistics.csv'}")
+    print(f"  - Visualizations: {OUT_DIR / '*.png'}")
     
     print(f"\nResults saved to: {OUT_DIR}")
     print("="*80)
