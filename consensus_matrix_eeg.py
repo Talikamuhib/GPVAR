@@ -315,7 +315,7 @@ class ConsensusMatrix:
         return D
     
     def distance_dependent_consensus(self, 
-                                      target_sparsity: Optional[float] = 0.10,
+                                      target_sparsity: Optional[float] = None,
                                       n_bins: int = 10,
                                       epsilon: float = 0.1,
                                       require_existing: bool = True,
@@ -325,8 +325,8 @@ class ConsensusMatrix:
         
         Parameters
         ----------
-        target_sparsity : float or None
-            Target sparsity of final graph. Pass None to keep every qualifying edge.
+        target_sparsity : float or None, optional
+            Target sparsity of final graph. Defaults to None (keep every qualifying edge).
         n_bins : int
             Number of distance bins
         epsilon : float
@@ -761,7 +761,7 @@ class ConsensusMatrix:
         return metrics
     
     def uniform_consensus(self, 
-                          target_sparsity: Optional[float] = 0.10,
+                          target_sparsity: Optional[float] = None,
                           require_existing: bool = True) -> np.ndarray:
         """
         Build final group graph using uniform consensus (baseline).
@@ -769,8 +769,8 @@ class ConsensusMatrix:
         
         Parameters
         ----------
-        target_sparsity : float or None
-            Target sparsity of final graph. Pass None to keep every qualifying edge.
+        target_sparsity : float or None, optional
+            Target sparsity of final graph. Defaults to None (keep every qualifying edge).
         require_existing : bool
             If True, only consider edges with C > 0
             
@@ -904,7 +904,7 @@ def process_eeg_files(file_paths: List[str],
                       group_labels: Optional[List[str]] = None,
                       channel_locations: Optional[np.ndarray] = None,
                       sparsity_binarize: float = 0.15,
-                      sparsity_final: Optional[float] = 0.10,
+                      sparsity_final: Optional[float] = None,
                       method: str = 'distance',
                       output_dir: str = "./consensus_results") -> Dict:
     """
@@ -920,8 +920,8 @@ def process_eeg_files(file_paths: List[str],
         Pre-specified 3D channel coordinates (n_channels x 3)
     sparsity_binarize : float
         Sparsity for initial binarization
-    sparsity_final : float or None
-        Target sparsity for final graph. Pass None to keep every qualifying edge.
+    sparsity_final : float or None, optional
+        Target sparsity for final graph. Defaults to None (keep every qualifying edge).
     method : str
         'distance' for distance-dependent or 'uniform' for baseline
     output_dir : str

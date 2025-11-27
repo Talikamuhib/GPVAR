@@ -445,9 +445,9 @@ consensus_results/
   - Higher values → more edges considered → smoother consensus
   - Lower values → fewer edges → sparser, more selective consensus
 
-- **sparsity_final** (default: 0.10; pass `None` to disable): Fraction of edges in final group graph
-  - Controls the density of the output network when a value is provided
-  - Setting `None` keeps every edge that survives per-subject binarization/consensus
+- **sparsity_final** (default: `None`): Fraction of edges in final group graph
+  - By default, every edge that survives the per-subject binarization/consensus is kept
+  - Provide a value (e.g., 0.10) only if you need a specific final density
   - Explicit sparsity targets should typically be ≤ `sparsity_binarize`
 
 ### Distance-Dependent Parameters
