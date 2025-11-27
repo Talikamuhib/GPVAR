@@ -315,7 +315,7 @@ class ConsensusMatrix:
         return D
     
     def distance_dependent_consensus(self, 
-                                      target_sparsity: float = 0.10,
+                                      target_sparsity: Optional[float] = 0.10,
                                       n_bins: int = 10,
                                       epsilon: float = 0.1,
                                       require_existing: bool = True,
@@ -325,8 +325,8 @@ class ConsensusMatrix:
         
         Parameters
         ----------
-        target_sparsity : float
-            Target sparsity of final graph
+        target_sparsity : float or None
+            Target sparsity of final graph. Pass None to keep every qualifying edge.
         n_bins : int
             Number of distance bins
         epsilon : float
@@ -347,6 +347,26 @@ class ConsensusMatrix:
         n_nodes = self.consensus_matrix.shape[0]
         C = self.consensus_matrix
         W = self.weight_matrix
+        unlimited = target_sparsity is None
+        
+        if unlimited:
+            logger.info("Target sparsity disabled; keeping all qualifying edges (distance-dependent consensus).")
+            if require_existing:
+                mask = self.consensus_matrix > 0
+            else:
+                mask = np.ones_like(self.consensus_matrix, dtype=bool)
+            mask &= self.weight_matrix > 0
+            np.fill_diagonal(mask, False)
+            G = np.where(mask, self.weight_matrix, 0.0)
+            self.distance_graph = np.maximum(G, G.T)
+            if save_path is not None:
+                save_path = Path(save_path)
+                save_path.parent.mkdir(parents=True, exist_ok=True)
+                np.save(save_path, self.distance_graph)
+                logger.info(f"Saved distance-dependent consensus graph to {save_path}")
+            selected_edges = int(np.sum(np.triu(self.distance_graph > 0, k=1)))
+            logger.info("Selected %d edges without sparsity target", selected_edges)
+            return self.distance_graph
         
         # Compute distance matrix
         D = self.compute_distance_matrix()
@@ -739,10 +759,9 @@ class ConsensusMatrix:
         }
         
         return metrics
-*** End Patch
     
     def uniform_consensus(self, 
-                          target_sparsity: float = 0.10,
+                          target_sparsity: Optional[float] = 0.10,
                           require_existing: bool = True) -> np.ndarray:
         """
         Build final group graph using uniform consensus (baseline).
@@ -750,8 +769,8 @@ class ConsensusMatrix:
         
         Parameters
         ----------
-        target_sparsity : float
-            Target sparsity of final graph
+        target_sparsity : float or None
+            Target sparsity of final graph. Pass None to keep every qualifying edge.
         require_existing : bool
             If True, only consider edges with C > 0
             
@@ -766,6 +785,17 @@ class ConsensusMatrix:
         n_nodes = self.consensus_matrix.shape[0]
         C = self.consensus_matrix
         W = self.weight_matrix
+        
+        if target_sparsity is None:
+            logger.info("Target sparsity disabled; keeping all qualifying edges (uniform consensus).")
+            if require_existing:
+                mask = C > 0
+            else:
+                mask = np.ones_like(C, dtype=bool)
+            mask &= W > 0
+            np.fill_diagonal(mask, False)
+            G = np.where(mask, W, 0.0)
+            return np.maximum(G, G.T)
         
         # Get upper triangle indices
         triu_indices = np.triu_indices(n_nodes, k=1)
@@ -874,7 +904,7 @@ def process_eeg_files(file_paths: List[str],
                       group_labels: Optional[List[str]] = None,
                       channel_locations: Optional[np.ndarray] = None,
                       sparsity_binarize: float = 0.15,
-                      sparsity_final: float = 0.10,
+                      sparsity_final: Optional[float] = 0.10,
                       method: str = 'distance',
                       output_dir: str = "./consensus_results") -> Dict:
     """
@@ -890,8 +920,8 @@ def process_eeg_files(file_paths: List[str],
         Pre-specified 3D channel coordinates (n_channels x 3)
     sparsity_binarize : float
         Sparsity for initial binarization
-    sparsity_final : float
-        Target sparsity for final graph
+    sparsity_final : float or None
+        Target sparsity for final graph. Pass None to keep every qualifying edge.
     method : str
         'distance' for distance-dependent or 'uniform' for baseline
     output_dir : str

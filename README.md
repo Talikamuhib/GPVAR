@@ -390,7 +390,7 @@ from consensus_matrix_eeg import ConsensusMatrix, process_eeg_files
 results = process_eeg_files(
     file_paths=eeg_file_list,
     sparsity_binarize=0.15,  # Keep 15% edges during binarization
-    sparsity_final=0.10,      # Keep 10% edges in final graph
+    sparsity_final=None,      # Set None to keep every qualifying edge (disable final thresholding)
     method='distance',        # Use distance-dependent consensus
     output_dir="./consensus_results"
 )
@@ -445,9 +445,10 @@ consensus_results/
   - Higher values → more edges considered → smoother consensus
   - Lower values → fewer edges → sparser, more selective consensus
 
-- **sparsity_final** (default: 0.10): Fraction of edges in final group graph
-  - Controls the density of the output network
-  - Should typically be ≤ sparsity_binarize
+- **sparsity_final** (default: 0.10; pass `None` to disable): Fraction of edges in final group graph
+  - Controls the density of the output network when a value is provided
+  - Setting `None` keeps every edge that survives per-subject binarization/consensus
+  - Explicit sparsity targets should typically be ≤ `sparsity_binarize`
 
 ### Distance-Dependent Parameters
 
