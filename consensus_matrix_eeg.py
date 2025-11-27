@@ -53,6 +53,7 @@ class ConsensusMatrix:
         self.binary_matrices = []
         self.adjacency_matrices = []
         self.subject_labels = []
+        self.distance_graph = None
         
     def load_eeg_data(self, filepath: str) -> np.ndarray:
         """
@@ -221,6 +222,7 @@ class ConsensusMatrix:
         
         # Store adjacency matrices
         self.adjacency_matrices = adjacency_matrices
+        self.distance_graph = None
         
         # Step 1: Binarize each subject's matrix
         logger.info(f"Binarizing {n_subjects} matrices with sparsity={sparsity}")
@@ -283,7 +285,8 @@ class ConsensusMatrix:
                                       target_sparsity: float = 0.10,
                                       n_bins: int = 10,
                                       epsilon: float = 0.1,
-                                      require_existing: bool = True) -> np.ndarray:
+                                      require_existing: bool = True,
+                                      save_path: Optional[Union[str, Path]] = None) -> np.ndarray:
         """
         Build final group graph using distance-dependent consensus.
         
@@ -297,6 +300,8 @@ class ConsensusMatrix:
             Weight for W in scoring (score = C + ε*W)
         require_existing : bool
             If True, only consider edges with C > 0
+        save_path : str or Path, optional
+            Where to save the resulting distance-dependent graph (.npy)
             
         Returns
         -------
@@ -407,6 +412,13 @@ class ConsensusMatrix:
                     G[j, i] = W[i, j]
                     selected_edges.add(edge)
 
+        self.distance_graph = G.copy()
+        if save_path is not None:
+            save_path = Path(save_path)
+            save_path.parent.mkdir(parents=True, exist_ok=True)
+            np.save(save_path, self.distance_graph)
+            logger.info(f"Saved distance-dependent consensus graph to {save_path}")
+        
         logger.info(f"Selected {len(selected_edges)} edges with distance-dependent consensus")
         
         return G
@@ -533,11 +545,16 @@ class ConsensusMatrix:
             np.save(output_path / f"{prefix}_binary_matrices.npy", 
                     np.array(self.binary_matrices))
         
+        # Save distance-dependent graph if available
+        if self.distance_graph is not None:
+            np.save(output_path / f"{prefix}_distance_graph.npy", self.distance_graph)
+        
         logger.info(f"Results saved to {output_dir}")
 
 
 def process_eeg_files(file_paths: List[str], 
                       group_labels: Optional[List[str]] = None,
+                      channel_locations: Optional[np.ndarray] = None,
                       sparsity_binarize: float = 0.15,
                       sparsity_final: float = 0.10,
                       method: str = 'distance',
@@ -551,6 +568,8 @@ def process_eeg_files(file_paths: List[str],
         List of paths to EEG files
     group_labels : List[str], optional
         Group labels for each file (e.g., 'AD', 'HC')
+    channel_locations : np.ndarray, optional
+        Pre-specified 3D channel coordinates (n_channels x 3)
     sparsity_binarize : float
         Sparsity for initial binarization
     sparsity_final : float
@@ -566,7 +585,9 @@ def process_eeg_files(file_paths: List[str],
         Dictionary containing consensus matrices and final graphs
     """
     # Initialize consensus builder
-    consensus_builder = ConsensusMatrix()
+    consensus_builder = ConsensusMatrix(channel_locations=channel_locations)
+    output_path = Path(output_dir)
+    output_path.mkdir(parents=True, exist_ok=True)
     
     # Load data and compute adjacency matrices
     adjacency_matrices = []
@@ -600,18 +621,19 @@ def process_eeg_files(file_paths: List[str],
     # Build final group graph
     if method == 'distance':
         if consensus_builder.channel_locations is None:
-            logger.warning("No channel locations available, falling back to uniform consensus")
-            G = consensus_builder.uniform_consensus(target_sparsity=sparsity_final)
-        else:
-            G = consensus_builder.distance_dependent_consensus(target_sparsity=sparsity_final)
+            raise ValueError("Distance-dependent consensus requested but channel locations are missing.")
+        G = consensus_builder.distance_dependent_consensus(
+            target_sparsity=sparsity_final,
+            save_path=output_path / "consensus_distance_graph.npy"
+        )
     else:
         G = consensus_builder.uniform_consensus(target_sparsity=sparsity_final)
     
     # Visualize results
-    consensus_builder.visualize_consensus(save_path=f"{output_dir}/consensus_visualization.png")
+    consensus_builder.visualize_consensus(save_path=str(output_path / "consensus_visualization.png"))
     
     # Save results
-    consensus_builder.save_results(output_dir)
+    consensus_builder.save_results(str(output_path))
     
     # Package results
     results = {
