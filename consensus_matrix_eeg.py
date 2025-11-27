@@ -12,6 +12,7 @@ import scipy.stats as stats
 from scipy.spatial.distance import pdist, squareform
 from scipy.signal import hilbert
 import mne
+from mne.channels import make_standard_montage
 import pandas as pd
 from pathlib import Path
 import warnings
@@ -23,6 +24,8 @@ import logging
 # Configure logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
+
+DEFAULT_MONTAGE_NAME = "biosemi128"
 
 class ConsensusMatrix:
     """
@@ -72,6 +75,16 @@ class ConsensusMatrix:
         try:
             # Try loading with MNE first (preferred for EEGLAB files)
             raw = mne.io.read_raw_eeglab(filepath, preload=True, verbose=False)
+            
+            # Apply BioSemi montage if missing
+            if raw.get_montage() is None:
+                try:
+                    biosemi_montage = make_standard_montage(DEFAULT_MONTAGE_NAME)
+                    raw.set_montage(biosemi_montage, on_missing='warn')
+                    logger.info(f"Applied {DEFAULT_MONTAGE_NAME} montage to {filepath}")
+                except Exception as montage_err:
+                    logger.warning(f"Failed to apply {DEFAULT_MONTAGE_NAME} montage to {filepath}: {montage_err}")
+            
             data = raw.get_data()
             
             # Store channel locations if not already set
@@ -80,7 +93,26 @@ class ConsensusMatrix:
                 if montage is not None:
                     positions = montage.get_positions()['ch_pos']
                     ch_names = raw.ch_names
-                    self.channel_locations = np.array([positions[ch] for ch in ch_names if ch in positions])
+                    
+                    coords = []
+                    missing_channels = []
+                    for ch in ch_names:
+                        if ch in positions:
+                            coords.append(positions[ch])
+                        else:
+                            missing_channels.append(ch)
+                    
+                    if missing_channels:
+                        preview = ", ".join(missing_channels[:5])
+                        if len(missing_channels) > 5:
+                            preview += ", ..."
+                        logger.warning(
+                            "Montage missing coordinates for channels (%s); distance-dependent consensus unavailable until resolved.",
+                            preview
+                        )
+                    elif coords:
+                        self.channel_locations = np.array(coords)
+                        logger.info(f"Captured channel coordinates from montage ({len(coords)} channels)")
                     
             return data
             
