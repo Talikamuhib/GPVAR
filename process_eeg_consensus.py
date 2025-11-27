@@ -472,7 +472,7 @@ def main():
     """
     # Parameters
     SPARSITY_BINARIZE = 0.15  # Sparsity for initial binarization (15% edges kept)
-    SPARSITY_FINAL = 0.10      # Target sparsity for final graph (10% edges)
+    SPARSITY_FINAL = None     # Set to None to keep every qualifying edge in the final graph
     USE_DISTANCE = True        # Use distance-dependent consensus
     OUTPUT_DIR = "./consensus_results"
     
