@@ -335,7 +335,7 @@ class ConsensusMatrix:
         remaining_edges = k_target % n_bins
         
         # Process each distance bin
-        selected_edges = []
+        selected_edges = set()
         
         for bin_idx in range(n_bins):
             # Find edges in this bin
@@ -372,10 +372,41 @@ class ConsensusMatrix:
             
             for idx in sorted_indices:
                 i, j = valid_indices[idx]
+                edge = tuple(sorted((i, j)))
+                if edge in selected_edges:
+                    continue
                 G[i, j] = W[i, j]
                 G[j, i] = W[i, j]
-                selected_edges.append((i, j))
-        
+                selected_edges.add(edge)
+
+        # Fill any remaining slots using best global edges (C + εW) regardless of bin
+        remaining = k_target - len(selected_edges)
+        if remaining > 0:
+            logger.info(f"Distance bins left {remaining} edges unfilled; selecting globally.")
+            candidate_scores = []
+            candidate_pairs = []
+            for idx in range(len(triu_indices[0])):
+                i, j = triu_indices[0][idx], triu_indices[1][idx]
+                if require_existing and C[i, j] == 0:
+                    continue
+                edge = tuple(sorted((i, j)))
+                if edge in selected_edges:
+                    continue
+                score = C[i, j] + epsilon * W[i, j]
+                if score <= 0:
+                    continue
+                candidate_scores.append(score)
+                candidate_pairs.append((i, j))
+            
+            if candidate_scores:
+                order = np.argsort(candidate_scores)[::-1][:remaining]
+                for idx in order:
+                    i, j = candidate_pairs[idx]
+                    edge = tuple(sorted((i, j)))
+                    G[i, j] = W[i, j]
+                    G[j, i] = W[i, j]
+                    selected_edges.add(edge)
+
         logger.info(f"Selected {len(selected_edges)} edges with distance-dependent consensus")
         
         return G
