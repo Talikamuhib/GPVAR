@@ -12,6 +12,7 @@ import scipy.stats as stats
 from scipy.spatial.distance import pdist, squareform
 from scipy.signal import hilbert
 import mne
+from mne.channels import make_standard_montage
 import pandas as pd
 from pathlib import Path
 import warnings
@@ -23,6 +24,8 @@ import logging
 # Configure logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
+
+DEFAULT_MONTAGE_NAME = "biosemi128"
 
 class ConsensusMatrix:
     """
@@ -53,6 +56,7 @@ class ConsensusMatrix:
         self.binary_matrices = []
         self.adjacency_matrices = []
         self.subject_labels = []
+        self.distance_graph = None
         
     def load_eeg_data(self, filepath: str) -> np.ndarray:
         """
@@ -71,6 +75,16 @@ class ConsensusMatrix:
         try:
             # Try loading with MNE first (preferred for EEGLAB files)
             raw = mne.io.read_raw_eeglab(filepath, preload=True, verbose=False)
+            
+            # Apply BioSemi montage if missing
+            if raw.get_montage() is None:
+                try:
+                    biosemi_montage = make_standard_montage(DEFAULT_MONTAGE_NAME)
+                    raw.set_montage(biosemi_montage, on_missing='warn')
+                    logger.info(f"Applied {DEFAULT_MONTAGE_NAME} montage to {filepath}")
+                except Exception as montage_err:
+                    logger.warning(f"Failed to apply {DEFAULT_MONTAGE_NAME} montage to {filepath}: {montage_err}")
+            
             data = raw.get_data()
             
             # Store channel locations if not already set
@@ -79,7 +93,26 @@ class ConsensusMatrix:
                 if montage is not None:
                     positions = montage.get_positions()['ch_pos']
                     ch_names = raw.ch_names
-                    self.channel_locations = np.array([positions[ch] for ch in ch_names if ch in positions])
+                    
+                    coords = []
+                    missing_channels = []
+                    for ch in ch_names:
+                        if ch in positions:
+                            coords.append(positions[ch])
+                        else:
+                            missing_channels.append(ch)
+                    
+                    if missing_channels:
+                        preview = ", ".join(missing_channels[:5])
+                        if len(missing_channels) > 5:
+                            preview += ", ..."
+                        logger.warning(
+                            "Montage missing coordinates for channels (%s); distance-dependent consensus unavailable until resolved.",
+                            preview
+                        )
+                    elif coords:
+                        self.channel_locations = np.array(coords)
+                        logger.info(f"Captured channel coordinates from montage ({len(coords)} channels)")
                     
             return data
             
@@ -221,6 +254,7 @@ class ConsensusMatrix:
         
         # Store adjacency matrices
         self.adjacency_matrices = adjacency_matrices
+        self.distance_graph = None
         
         # Step 1: Binarize each subject's matrix
         logger.info(f"Binarizing {n_subjects} matrices with sparsity={sparsity}")
@@ -283,7 +317,8 @@ class ConsensusMatrix:
                                       target_sparsity: float = 0.10,
                                       n_bins: int = 10,
                                       epsilon: float = 0.1,
-                                      require_existing: bool = True) -> np.ndarray:
+                                      require_existing: bool = True,
+                                      save_path: Optional[Union[str, Path]] = None) -> np.ndarray:
         """
         Build final group graph using distance-dependent consensus.
         
@@ -297,6 +332,8 @@ class ConsensusMatrix:
             Weight for W in scoring (score = C + ε*W)
         require_existing : bool
             If True, only consider edges with C > 0
+        save_path : str or Path, optional
+            Where to save the resulting distance-dependent graph (.npy)
             
         Returns
         -------
@@ -335,7 +372,7 @@ class ConsensusMatrix:
         remaining_edges = k_target % n_bins
         
         # Process each distance bin
-        selected_edges = []
+        selected_edges = set()
         
         for bin_idx in range(n_bins):
             # Find edges in this bin
@@ -372,9 +409,47 @@ class ConsensusMatrix:
             
             for idx in sorted_indices:
                 i, j = valid_indices[idx]
+                edge = tuple(sorted((i, j)))
+                if edge in selected_edges:
+                    continue
                 G[i, j] = W[i, j]
                 G[j, i] = W[i, j]
-                selected_edges.append((i, j))
+                selected_edges.add(edge)
+
+        # Fill any remaining slots using best global edges (C + εW) regardless of bin
+        remaining = k_target - len(selected_edges)
+        if remaining > 0:
+            logger.info(f"Distance bins left {remaining} edges unfilled; selecting globally.")
+            candidate_scores = []
+            candidate_pairs = []
+            for idx in range(len(triu_indices[0])):
+                i, j = triu_indices[0][idx], triu_indices[1][idx]
+                if require_existing and C[i, j] == 0:
+                    continue
+                edge = tuple(sorted((i, j)))
+                if edge in selected_edges:
+                    continue
+                score = C[i, j] + epsilon * W[i, j]
+                if score <= 0:
+                    continue
+                candidate_scores.append(score)
+                candidate_pairs.append((i, j))
+            
+            if candidate_scores:
+                order = np.argsort(candidate_scores)[::-1][:remaining]
+                for idx in order:
+                    i, j = candidate_pairs[idx]
+                    edge = tuple(sorted((i, j)))
+                    G[i, j] = W[i, j]
+                    G[j, i] = W[i, j]
+                    selected_edges.add(edge)
+
+        self.distance_graph = G.copy()
+        if save_path is not None:
+            save_path = Path(save_path)
+            save_path.parent.mkdir(parents=True, exist_ok=True)
+            np.save(save_path, self.distance_graph)
+            logger.info(f"Saved distance-dependent consensus graph to {save_path}")
         
         logger.info(f"Selected {len(selected_edges)} edges with distance-dependent consensus")
         
@@ -502,11 +577,16 @@ class ConsensusMatrix:
             np.save(output_path / f"{prefix}_binary_matrices.npy", 
                     np.array(self.binary_matrices))
         
+        # Save distance-dependent graph if available
+        if self.distance_graph is not None:
+            np.save(output_path / f"{prefix}_distance_graph.npy", self.distance_graph)
+        
         logger.info(f"Results saved to {output_dir}")
 
 
 def process_eeg_files(file_paths: List[str], 
                       group_labels: Optional[List[str]] = None,
+                      channel_locations: Optional[np.ndarray] = None,
                       sparsity_binarize: float = 0.15,
                       sparsity_final: float = 0.10,
                       method: str = 'distance',
@@ -520,6 +600,8 @@ def process_eeg_files(file_paths: List[str],
         List of paths to EEG files
     group_labels : List[str], optional
         Group labels for each file (e.g., 'AD', 'HC')
+    channel_locations : np.ndarray, optional
+        Pre-specified 3D channel coordinates (n_channels x 3)
     sparsity_binarize : float
         Sparsity for initial binarization
     sparsity_final : float
@@ -535,7 +617,9 @@ def process_eeg_files(file_paths: List[str],
         Dictionary containing consensus matrices and final graphs
     """
     # Initialize consensus builder
-    consensus_builder = ConsensusMatrix()
+    consensus_builder = ConsensusMatrix(channel_locations=channel_locations)
+    output_path = Path(output_dir)
+    output_path.mkdir(parents=True, exist_ok=True)
     
     # Load data and compute adjacency matrices
     adjacency_matrices = []
@@ -569,18 +653,19 @@ def process_eeg_files(file_paths: List[str],
     # Build final group graph
     if method == 'distance':
         if consensus_builder.channel_locations is None:
-            logger.warning("No channel locations available, falling back to uniform consensus")
-            G = consensus_builder.uniform_consensus(target_sparsity=sparsity_final)
-        else:
-            G = consensus_builder.distance_dependent_consensus(target_sparsity=sparsity_final)
+            raise ValueError("Distance-dependent consensus requested but channel locations are missing.")
+        G = consensus_builder.distance_dependent_consensus(
+            target_sparsity=sparsity_final,
+            save_path=output_path / "consensus_distance_graph.npy"
+        )
     else:
         G = consensus_builder.uniform_consensus(target_sparsity=sparsity_final)
     
     # Visualize results
-    consensus_builder.visualize_consensus(save_path=f"{output_dir}/consensus_visualization.png")
+    consensus_builder.visualize_consensus(save_path=str(output_path / "consensus_visualization.png"))
     
     # Save results
-    consensus_builder.save_results(output_dir)
+    consensus_builder.save_results(str(output_path))
     
     # Package results
     results = {
@@ -597,54 +682,82 @@ def process_eeg_files(file_paths: List[str],
 
 
 if __name__ == "__main__":
-    # Example usage with your file paths
-    
-    # File paths (truncated for example - you would use your full list)
-    ad_ar_files = [
+    # Full EEG file list (BioSemi 128-channel recordings)
+    files = [
         '/home/muhibt/project/filter_identification/data/synapse_data/1_AD/AR/sub-30018/eeg/s6_sub-30018_rs-hep_eeg.set',
         '/home/muhibt/project/filter_identification/data/synapse_data/1_AD/AR/sub-30026/eeg/s6_sub-30026_rs-hep_eeg.set',
-        # ... add all AD AR files
-    ]
-    
-    ad_cl_files = [
+        '/home/muhibt/project/filter_identification/data/synapse_data/1_AD/AR/sub-30011/eeg/s6_sub-30011_rs-hep_eeg.set',
+        '/home/muhibt/project/filter_identification/data/synapse_data/1_AD/AR/sub-30009/eeg/s6_sub-30009_rs-hep_eeg.set',
+        '/home/muhibt/project/filter_identification/data/synapse_data/1_AD/AR/sub-30012/eeg/s6_sub-30012_rs-hep_eeg.set',
+        '/home/muhibt/project/filter_identification/data/synapse_data/1_AD/AR/sub-30002/eeg/s6_sub-30002_rs-hep_eeg.set',
+        '/home/muhibt/project/filter_identification/data/synapse_data/1_AD/AR/sub-30017/eeg/s6_sub-30017_rs-hep_eeg.set',
+        '/home/muhibt/project/filter_identification/data/synapse_data/1_AD/AR/sub-30001/eeg/s6_sub-30001_rs-hep_eeg.set',
+        '/home/muhibt/project/filter_identification/data/synapse_data/1_AD/AR/sub-30029/eeg/s6_sub-30029_rs-hep_eeg.set',
+        '/home/muhibt/project/filter_identification/data/synapse_data/1_AD/AR/sub-30015/eeg/s6_sub-30015_rs-hep_eeg.set',
+        '/home/muhibt/project/filter_identification/data/synapse_data/1_AD/AR/sub-30013/eeg/s6_sub-30013_rs-hep_eeg.set',
+        '/home/muhibt/project/filter_identification/data/synapse_data/1_AD/AR/sub-30008/eeg/s6_sub-30008_rs-hep_eeg.set',
+        '/home/muhibt/project/filter_identification/data/synapse_data/1_AD/AR/sub-30031/eeg/s6_sub-30031_rs-hep_eeg.set',
+        '/home/muhibt/project/filter_identification/data/synapse_data/1_AD/AR/sub-30022/eeg/s6_sub-30022_rs-hep_eeg.set',
+        '/home/muhibt/project/filter_identification/data/synapse_data/1_AD/AR/sub-30020/eeg/s6_sub-30020_rs-hep_eeg.set',
+        '/home/muhibt/project/filter_identification/data/synapse_data/1_AD/AR/sub-30004/eeg/s6_sub-30004_rs-hep_eeg.set',
         '/home/muhibt/project/filter_identification/data/synapse_data/1_AD/CL/sub-30003/eeg/s6_sub-30003_rs-hep_eeg.set',
         '/home/muhibt/project/filter_identification/data/synapse_data/1_AD/CL/sub-30007/eeg/s6_sub-30007_rs-hep_eeg.set',
-        # ... add all AD CL files
+        '/home/muhibt/project/filter_identification/data/synapse_data/1_AD/CL/sub-30005/eeg/s6_sub-30005_rs-hep_eeg.set',
+        '/home/muhibt/project/filter_identification/data/synapse_data/1_AD/CL/sub-30006/eeg/s6_sub-30006_rs-hep_eeg.set',
+        '/home/muhibt/project/filter_identification/data/synapse_data/1_AD/CL/sub-30010/eeg/s6_sub-30010_rs-hep_eeg.set',
+        '/home/muhibt/project/filter_identification/data/synapse_data/1_AD/CL/sub-30014/eeg/s6_sub-30014_rs-hep_eeg.set',
+        '/home/muhibt/project/filter_identification/data/synapse_data/1_AD/CL/sub-30016/eeg/s6_sub-30016_rs-hep_eeg.set',
+        '/home/muhibt/project/filter_identification/data/synapse_data/1_AD/CL/sub-30019/eeg/s6_sub-30019_rs-hep_eeg.set',
+        '/home/muhibt/project/filter_identification/data/synapse_data/1_AD/CL/sub-30021/eeg/s6_sub-30021_rs-hep_eeg.set',
+        '/home/muhibt/project/filter_identification/data/synapse_data/1_AD/CL/sub-30023/eeg/s6_sub-30023_rs-hep_eeg.set',
+        '/home/muhibt/project/filter_identification/data/synapse_data/1_AD/CL/sub-30024/eeg/s6_sub-30024_rs-hep_eeg.set',
+        '/home/muhibt/project/filter_identification/data/synapse_data/1_AD/CL/sub-30025/eeg/s6_sub-30025_rs-hep_eeg.set',
+        '/home/muhibt/project/filter_identification/data/synapse_data/1_AD/CL/sub-30027/eeg/s6_sub-30027_rs-hep_eeg.set',
+        '/home/muhibt/project/filter_identification/data/synapse_data/1_AD/CL/sub-30028/eeg/s6_sub-30028_rs-hep_eeg.set',
+        '/home/muhibt/project/filter_identification/data/synapse_data/1_AD/CL/sub-30030/eeg/s6_sub-30030_rs-hep_eeg.set',
+        '/home/muhibt/project/filter_identification/data/synapse_data/1_AD/CL/sub-30032/eeg/s6_sub-30032_rs-hep_eeg.set',
+        '/home/muhibt/project/filter_identification/data/synapse_data/1_AD/CL/sub-30033/eeg/s6_sub-30033_rs-hep_eeg.set',
+        '/home/muhibt/project/filter_identification/data/synapse_data/1_AD/CL/sub-30034/eeg/s6_sub-30034_rs-hep_eeg.set',
+        '/home/muhibt/project/filter_identification/data/synapse_data/1_AD/CL/sub-30035/eeg/s6_sub-30035_rs-hep_eeg.set',
+        '/home/muhibt/project/filter_identification/data/synapse_data/5_HC/AR/sub-10002/eeg/s6_sub-10002_rs_eeg.set',
+        '/home/muhibt/project/filter_identification/data/synapse_data/5_HC/AR/sub-10009/eeg/s6_sub-10009_rs_eeg.set',
+        '/home/muhibt/project/filter_identification/data/synapse_data/5_HC/AR/sub-100012/eeg/s6_sub-100012_rs_eeg.set',
+        '/home/muhibt/project/filter_identification/data/synapse_data/5_HC/AR/sub-100015/eeg/s6_sub-100015_rs_eeg.set',
+        '/home/muhibt/project/filter_identification/data/synapse_data/5_HC/AR/sub-100020/eeg/s6_sub-100020_rs_eeg.set',
+        '/home/muhibt/project/filter_identification/data/synapse_data/5_HC/AR/sub-100035/eeg/s6_sub-100035_rs_eeg.set',
+        '/home/muhibt/project/filter_identification/data/synapse_data/5_HC/AR/sub-100028/eeg/s6_sub-100028_rs_eeg.set',
+        '/home/muhibt/project/filter_identification/data/synapse_data/5_HC/AR/sub-10006/eeg/s6_sub-10006_rs_eeg.set',
+        '/home/muhibt/project/filter_identification/data/synapse_data/5_HC/AR/sub-10007/eeg/s6_sub-10007_rs_eeg.set',
+        '/home/muhibt/project/filter_identification/data/synapse_data/5_HC/AR/sub-100033/eeg/s6_sub-100033_rs_eeg.set',
+        '/home/muhibt/project/filter_identification/data/synapse_data/5_HC/AR/sub-100022/eeg/s6_sub-100022_rs_eeg.set',
+        '/home/muhibt/project/filter_identification/data/synapse_data/5_HC/AR/sub-100031/eeg/s6_sub-100031_rs_eeg.set',
+        '/home/muhibt/project/filter_identification/data/synapse_data/5_HC/AR/sub-10003/eeg/s6_sub-10003_rs_eeg.set',
+        '/home/muhibt/project/filter_identification/data/synapse_data/5_HC/AR/sub-100026/eeg/s6_sub-100026_rs_eeg.set',
+        '/home/muhibt/project/filter_identification/data/synapse_data/5_HC/AR/sub-100030/eeg/s6_sub-100030_rs_eeg.set',
+        '/home/muhibt/project/filter_identification/data/synapse_data/5_HC/AR/sub-100018/eeg/s6_sub-100018_rs_eeg.set',
+        '/home/muhibt/project/filter_identification/data/synapse_data/5_HC/AR/sub-100024/eeg/s6_sub-100024_rs_eeg.set',
+        '/home/muhibt/project/filter_identification/data/synapse_data/5_HC/AR/sub-100038/eeg/s6_sub-100038_rs_eeg.set',
+        '/home/muhibt/project/filter_identification/data/synapse_data/5_HC/AR/sub-10004/eeg/s6_sub-10004_rs_eeg.set',
+        '/home/muhibt/project/filter_identification/data/synapse_data/5_HC/CL/sub-10001/eeg/s6_sub-10001_rs_eeg.set',
+        '/home/muhibt/project/filter_identification/data/synapse_data/5_HC/CL/sub-10005/eeg/s6_sub-10005_rs_eeg.set',
+        '/home/muhibt/project/filter_identification/data/synapse_data/5_HC/CL/sub-10008/eeg/s6_sub-10008_rs_eeg.set',
+        '/home/muhibt/project/filter_identification/data/synapse_data/5_HC/CL/sub-100010/eeg/s6_sub-100010_rs_eeg.set',
+        '/home/muhibt/project/filter_identification/data/synapse_data/5_HC/CL/sub-100011/eeg/s6_sub-100011_rs_eeg.set',
+        '/home/muhibt/project/filter_identification/data/synapse_data/5_HC/CL/sub-100014/eeg/s6_sub-100014_rs_eeg.set',
+        '/home/muhibt/project/filter_identification/data/synapse_data/5_HC/CL/sub-100017/eeg/s6_sub-100017_rs_eeg.set',
+        '/home/muhibt/project/filter_identification/data/synapse_data/5_HC/CL/sub-100021/eeg/s6_sub-100021_rs_eeg.set',
+        '/home/muhibt/project/filter_identification/data/synapse_data/5_HC/CL/sub-100029/eeg/s6_sub-100029_rs_eeg.set',
+        '/home/muhibt/project/filter_identification/data/synapse_data/5_HC/CL/sub-100034/eeg/s6_sub-100034_rs_eeg.set',
+        '/home/muhibt/project/filter_identification/data/synapse_data/5_HC/CL/sub-100037/eeg/s6_sub-100037_rs_eeg.set',
+        '/home/muhibt/project/filter_identification/data/synapse_data/5_HC/CL/sub-100043/eeg/s6_sub-100043_rs_eeg.set',
     ]
     
-    hc_ar_files = [
-        "/home/muhibt/project/filter_identification/data/synapse_data/5_HC/AR/sub-10002/eeg/s6_sub-10002_rs_eeg.set",
-        "/home/muhibt/project/filter_identification/data/synapse_data/5_HC/AR/sub-10009/eeg/s6_sub-10009_rs_eeg.set",
-        # ... add all HC AR files
-    ]
+    results = process_eeg_files(
+        file_paths=files,
+        sparsity_binarize=0.15,
+        sparsity_final=0.10,
+        method='distance',
+        output_dir="./consensus_results/ALL_Files"
+    )
     
-    hc_cl_files = [
-        "/home/muhibt/project/filter_identification/data/synapse_data/5_HC/CL/sub-10001/eeg/s6_sub-10001_rs_eeg.set",
-        "/home/muhibt/project/filter_identification/data/synapse_data/5_HC/CL/sub-10005/eeg/s6_sub-10005_rs_eeg.set",
-        # ... add all HC CL files
-    ]
-    
-    # Process each group separately
-    groups = {
-        'AD_AR': ad_ar_files,
-        'AD_CL': ad_cl_files,
-        'HC_AR': hc_ar_files,
-        'HC_CL': hc_cl_files
-    }
-    
-    all_results = {}
-    
-    for group_name, file_list in groups.items():
-        logger.info(f"\nProcessing {group_name} group...")
-        
-        results = process_eeg_files(
-            file_paths=file_list,
-            sparsity_binarize=0.15,  # Sparsity for binarization
-            sparsity_final=0.10,      # Target sparsity for final graph
-            method='distance',        # Use distance-dependent consensus
-            output_dir=f"./consensus_results/{group_name}"
-        )
-        
-        all_results[group_name] = results
-        
-    logger.info("\nAll groups processed successfully!")
+    logger.info("Consensus processing complete for ALL_Files. Outputs written to ./consensus_results/ALL_Files")
