@@ -21,3 +21,4 @@ h5py>=3.0.0           # For reading HDF5 format files
 mat73>=0.59           # For reading MATLAB v7.3 files
 pyedflib>=0.1.30      # For reading EDF files if needed
 joblib>=1.0.0         # For parallel processing
+networkx>=3.0        # For graph-theoretic metrics and small-world stats
