@@ -54,6 +54,8 @@ class ConsensusMatrix:
         self.channel_locations = channel_locations
         self.consensus_matrix = None
         self.weight_matrix = None
+        self.weight_matrix_full = None
+        self.average_subject_sparsity = None
         self.binary_matrices = []
         self.adjacency_matrices = []
         self.subject_labels = []
@@ -256,6 +258,7 @@ class ConsensusMatrix:
         # Store adjacency matrices
         self.adjacency_matrices = adjacency_matrices
         self.distance_graph = None
+        adjacency_stack = np.stack(adjacency_matrices, axis=0)
         
         # Step 1: Binarize each subject's matrix
         logger.info(f"Binarizing {n_subjects} matrices with sparsity={sparsity}")
@@ -263,6 +266,7 @@ class ConsensusMatrix:
         for i, A in enumerate(adjacency_matrices):
             B = self.proportional_threshold_exact(A, sparsity)
             self.binary_matrices.append(B)
+        binary_stack = np.stack(self.binary_matrices, axis=0)
             
         # Step 2: Compute consensus matrix C
         # C_ij = mean across subjects of binary matrices
@@ -270,19 +274,20 @@ class ConsensusMatrix:
         
         # Step 3: Compute weight matrix W using Fisher-z averaging
         W = np.zeros((n_nodes, n_nodes))
+        triu_idx = np.triu_indices(n_nodes, k=1)
+        n_possible_edges = max(1, len(triu_idx[0]))
+        edge_counts = np.sum(binary_stack[:, triu_idx[0], triu_idx[1]], axis=1)
+        subject_sparsities = edge_counts / n_possible_edges
+        self.average_subject_sparsity = float(np.mean(subject_sparsities))
         
         for i in range(n_nodes):
             for j in range(i+1, n_nodes):
                 # Find subjects where edge exists
-                edge_exists = [self.binary_matrices[s][i, j] > 0 for s in range(n_subjects)]
+                edge_exists = binary_stack[:, i, j] > 0
                 
-                if any(edge_exists):
+                if np.any(edge_exists):
                     # Fisher-z transform correlations
-                    z_values = []
-                    for s in range(n_subjects):
-                        if edge_exists[s]:
-                            z = self.fisher_z_transform(adjacency_matrices[s][i, j])
-                            z_values.append(z)
+                    z_values = self.fisher_z_transform(adjacency_stack[edge_exists, i, j])
                     
                     # Average in z-space
                     z_mean = np.mean(z_values)
@@ -291,10 +296,49 @@ class ConsensusMatrix:
                     W[i, j] = np.abs(self.fisher_z_inverse(z_mean))
                     W[j, i] = W[i, j]  # Ensure symmetry
         
+        # Dense Fisher-z average across all subjects (retain raw correlation magnitudes)
+        z_all = self.fisher_z_transform(adjacency_stack)
+        z_mean_all = np.mean(z_all, axis=0)
+        W_full = np.abs(self.fisher_z_inverse(z_mean_all))
+        np.fill_diagonal(W_full, 0)
+        self.weight_matrix_full = np.maximum(W_full, W_full.T)
+        
         self.consensus_matrix = C
         self.weight_matrix = W
         
         return C, W
+    
+    def _resolve_target_sparsity(self, target_sparsity: Optional[Union[float, str]]) -> Optional[float]:
+        """
+        Normalize target sparsity specification.
+        
+        Parameters
+        ----------
+        target_sparsity : float, str, or None
+            - float in (0, 1]: explicit sparsity fraction
+            - "match_subject" / "subject_mean": use average sparsity of binarized subjects
+            - None: disable final sparsification (keep all qualifying edges)
+        
+        Returns
+        -------
+        Optional[float]
+            Resolved sparsity fraction or None if dense graph requested.
+        """
+        if target_sparsity is None:
+            return None
+        
+        if isinstance(target_sparsity, str):
+            key = target_sparsity.strip().lower()
+            if key in {"match_subject", "subject_mean", "mean_subject"}:
+                if self.average_subject_sparsity is None:
+                    raise ValueError("Average subject sparsity unavailable. Run compute_consensus_and_weights first.")
+                return self.average_subject_sparsity
+            raise ValueError(f"Unrecognized target_sparsity spec '{target_sparsity}'.")
+        
+        value = float(target_sparsity)
+        if value <= 0 or value > 1:
+            raise ValueError("target_sparsity must be in (0, 1].")
+        return value
     
     def compute_distance_matrix(self) -> np.ndarray:
         """
@@ -315,7 +359,7 @@ class ConsensusMatrix:
         return D
     
     def distance_dependent_consensus(self, 
-                                      target_sparsity: Optional[float] = None,
+                                      target_sparsity: Optional[Union[float, str]] = None,
                                       n_bins: int = 10,
                                       epsilon: float = 0.1,
                                       require_existing: bool = True,
@@ -325,8 +369,10 @@ class ConsensusMatrix:
         
         Parameters
         ----------
-        target_sparsity : float or None, optional
-            Target sparsity of final graph. Defaults to None (keep every qualifying edge).
+        target_sparsity : float, str, or None, optional
+            - float in (0,1]: explicit sparsity fraction
+            - "match_subject": match average sparsity observed across binarized subjects
+            - None: keep every qualifying edge
         n_bins : int
             Number of distance bins
         epsilon : float
@@ -347,17 +393,19 @@ class ConsensusMatrix:
         n_nodes = self.consensus_matrix.shape[0]
         C = self.consensus_matrix
         W = self.weight_matrix
-        unlimited = target_sparsity is None
+        resolved_sparsity = self._resolve_target_sparsity(target_sparsity)
+        unlimited = resolved_sparsity is None
         
         if unlimited:
             logger.info("Target sparsity disabled; keeping all qualifying edges (distance-dependent consensus).")
+            weight_source = self.weight_matrix_full if self.weight_matrix_full is not None else self.weight_matrix
             if require_existing:
-                mask = self.consensus_matrix > 0
+                mask = C > 0
             else:
-                mask = np.ones_like(self.consensus_matrix, dtype=bool)
-            mask &= self.weight_matrix > 0
+                mask = np.ones_like(C, dtype=bool)
+            mask &= weight_source > 0
             np.fill_diagonal(mask, False)
-            G = np.where(mask, self.weight_matrix, 0.0)
+            G = np.where(mask, weight_source, 0.0)
             self.distance_graph = np.maximum(G, G.T)
             if save_path is not None:
                 save_path = Path(save_path)
@@ -376,7 +424,7 @@ class ConsensusMatrix:
         n_possible_edges = len(triu_indices[0])
         
         # Calculate target number of edges
-        k_target = int(np.floor(target_sparsity * n_possible_edges))
+        k_target = int(np.clip(round(resolved_sparsity * n_possible_edges), 1, n_possible_edges))
         
         # Extract distances for upper triangle
         distances = D[triu_indices]
@@ -761,7 +809,7 @@ class ConsensusMatrix:
         return metrics
     
     def uniform_consensus(self, 
-                          target_sparsity: Optional[float] = None,
+                          target_sparsity: Optional[Union[float, str]] = None,
                           require_existing: bool = True) -> np.ndarray:
         """
         Build final group graph using uniform consensus (baseline).
@@ -769,8 +817,8 @@ class ConsensusMatrix:
         
         Parameters
         ----------
-        target_sparsity : float or None, optional
-            Target sparsity of final graph. Defaults to None (keep every qualifying edge).
+        target_sparsity : float, str, or None, optional
+            Same semantics as distance_dependent_consensus.
         require_existing : bool
             If True, only consider edges with C > 0
             
@@ -785,16 +833,18 @@ class ConsensusMatrix:
         n_nodes = self.consensus_matrix.shape[0]
         C = self.consensus_matrix
         W = self.weight_matrix
+        resolved_sparsity = self._resolve_target_sparsity(target_sparsity)
         
-        if target_sparsity is None:
+        if resolved_sparsity is None:
             logger.info("Target sparsity disabled; keeping all qualifying edges (uniform consensus).")
+            weight_source = self.weight_matrix_full if self.weight_matrix_full is not None else W
             if require_existing:
                 mask = C > 0
             else:
                 mask = np.ones_like(C, dtype=bool)
-            mask &= W > 0
+            mask &= weight_source > 0
             np.fill_diagonal(mask, False)
-            G = np.where(mask, W, 0.0)
+            G = np.where(mask, weight_source, 0.0)
             return np.maximum(G, G.T)
         
         # Get upper triangle indices
@@ -802,7 +852,7 @@ class ConsensusMatrix:
         n_possible_edges = len(triu_indices[0])
         
         # Calculate target number of edges
-        k_target = int(np.floor(target_sparsity * n_possible_edges))
+        k_target = int(np.clip(round(resolved_sparsity * n_possible_edges), 1, n_possible_edges))
         
         # Extract consensus values
         consensus_values = C[triu_indices]
@@ -888,6 +938,10 @@ class ConsensusMatrix:
         # Save weight matrix
         np.save(output_path / f"{prefix}_matrix_W.npy", self.weight_matrix)
         
+        # Save dense weight matrix if available
+        if self.weight_matrix_full is not None:
+            np.save(output_path / f"{prefix}_matrix_W_dense.npy", self.weight_matrix_full)
+        
         # Save binary matrices if available
         if self.binary_matrices:
             np.save(output_path / f"{prefix}_binary_matrices.npy", 
@@ -904,7 +958,7 @@ def process_eeg_files(file_paths: List[str],
                       group_labels: Optional[List[str]] = None,
                       channel_locations: Optional[np.ndarray] = None,
                       sparsity_binarize: float = 0.15,
-                      sparsity_final: Optional[float] = None,
+                      sparsity_final: Optional[Union[float, str]] = "match_subject",
                       method: str = 'distance',
                       output_dir: str = "./consensus_results") -> Dict:
     """
@@ -920,8 +974,9 @@ def process_eeg_files(file_paths: List[str],
         Pre-specified 3D channel coordinates (n_channels x 3)
     sparsity_binarize : float
         Sparsity for initial binarization
-    sparsity_final : float or None, optional
-        Target sparsity for final graph. Defaults to None (keep every qualifying edge).
+    sparsity_final : float, str, or None, optional
+        Target sparsity for final graph. Use a float in (0,1], "match_subject" to mirror
+        the average subject sparsity after binarization, or None to keep every qualifying edge.
     method : str
         'distance' for distance-dependent or 'uniform' for baseline
     output_dir : str
@@ -996,6 +1051,7 @@ def process_eeg_files(file_paths: List[str],
     results = {
         'consensus_matrix': C,
         'weight_matrix': W,
+        'weight_matrix_dense': consensus_builder.weight_matrix_full,
         'final_graph': G,
         'binary_matrices': np.array(consensus_builder.binary_matrices),
         'adjacency_matrices': np.array(adjacency_matrices),

@@ -471,8 +471,8 @@ def main():
     Main function to process all EEG files and create consensus matrices.
     """
     # Parameters
-    SPARSITY_BINARIZE = 0.15  # Sparsity for initial binarization (15% edges kept)
-    SPARSITY_FINAL = None     # Set to None to keep every qualifying edge in the final graph
+    SPARSITY_BINARIZE = 0.15   # Sparsity for initial binarization (15% edges kept)
+    SPARSITY_FINAL = "match_subject"  # Match group graph sparsity to average binarized subject sparsity
     USE_DISTANCE = True        # Use distance-dependent consensus
     OUTPUT_DIR = "./consensus_results"
     
