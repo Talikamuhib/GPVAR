@@ -2369,6 +2369,578 @@ class ConsensusResultsAnalyzer:
 
 
 # ============================================================================
+# Combined Consensus Analysis (AD + HC Together)
+# ============================================================================
+
+class CombinedConsensusAnalyzer:
+    """
+    Analyze combined consensus from multiple groups (e.g., AD + HC together).
+    
+    This creates:
+    1. OVERALL CONSENSUS: Single connectivity matrix from ALL subjects
+    2. GROUP DIFFERENCE: Which edges are stronger in AD vs HC
+    3. COMMON BACKBONE: Edges present in BOTH groups (reliable connectivity)
+    4. GROUP-SPECIFIC: Edges unique to each group
+    
+    Why this matters for AD research:
+    - Overall consensus shows the "normal" brain connectivity template
+    - Difference matrix highlights AD-specific connectivity changes
+    - Common backbone can be used as a shared graph for comparative GP-VAR
+    """
+    
+    def __init__(self):
+        self.group_consensus: Dict[str, np.ndarray] = {}
+        self.group_weights: Dict[str, np.ndarray] = {}
+        self.group_n_subjects: Dict[str, int] = {}
+        
+        # Combined results
+        self.overall_consensus: Optional[np.ndarray] = None
+        self.overall_weights: Optional[np.ndarray] = None
+        self.difference_matrix: Optional[np.ndarray] = None
+        self.common_backbone: Optional[np.ndarray] = None
+        
+    def add_group(self, 
+                  group_name: str,
+                  consensus_matrix: np.ndarray,
+                  weight_matrix: np.ndarray,
+                  n_subjects: int):
+        """
+        Add a group's consensus results.
+        
+        Parameters
+        ----------
+        group_name : str
+            Name of the group (e.g., 'AD', 'HC')
+        consensus_matrix : np.ndarray
+            Consensus matrix C for this group
+        weight_matrix : np.ndarray
+            Weight matrix W for this group
+        n_subjects : int
+            Number of subjects in this group
+        """
+        self.group_consensus[group_name] = consensus_matrix
+        self.group_weights[group_name] = weight_matrix
+        self.group_n_subjects[group_name] = n_subjects
+        
+    def compute_overall_consensus(self) -> Tuple[np.ndarray, np.ndarray]:
+        """
+        Compute overall consensus combining all groups.
+        
+        The overall consensus C_overall is a weighted average:
+        C_overall = Σ(n_g * C_g) / Σ(n_g)
+        
+        This represents the fraction of ALL subjects (across all groups)
+        that have each edge.
+        
+        Returns
+        -------
+        C_overall : np.ndarray
+            Overall consensus matrix
+        W_overall : np.ndarray
+            Overall weight matrix (Fisher-z averaged)
+        """
+        if not self.group_consensus:
+            raise ValueError("No groups added yet")
+        
+        # Get dimensions from first group
+        first_group = list(self.group_consensus.keys())[0]
+        n_nodes = self.group_consensus[first_group].shape[0]
+        
+        # Weighted average of consensus matrices
+        total_subjects = sum(self.group_n_subjects.values())
+        C_overall = np.zeros((n_nodes, n_nodes))
+        
+        for group_name, C in self.group_consensus.items():
+            n = self.group_n_subjects[group_name]
+            C_overall += n * C
+        
+        C_overall /= total_subjects
+        
+        # Fisher-z average of weights
+        W_sum = np.zeros((n_nodes, n_nodes))
+        W_count = np.zeros((n_nodes, n_nodes))
+        
+        for group_name, W in self.group_weights.items():
+            C = self.group_consensus[group_name]
+            n = self.group_n_subjects[group_name]
+            
+            # Only include edges that exist in this group
+            mask = C > 0
+            W_clipped = np.clip(W, -0.999, 0.999)
+            z = np.arctanh(W_clipped)
+            
+            W_sum[mask] += n * z[mask]
+            W_count[mask] += n
+        
+        # Average in z-space and transform back
+        W_count[W_count == 0] = 1  # Avoid division by zero
+        z_mean = W_sum / W_count
+        W_overall = np.abs(np.tanh(z_mean))
+        np.fill_diagonal(W_overall, 0)
+        
+        self.overall_consensus = C_overall
+        self.overall_weights = W_overall
+        
+        return C_overall, W_overall
+    
+    def compute_difference_matrix(self,
+                                  group1: str = 'AD',
+                                  group2: str = 'HC') -> np.ndarray:
+        """
+        Compute difference in connectivity between two groups.
+        
+        Difference = group1 - group2
+        
+        Positive values: Stronger in group1 (e.g., AD)
+        Negative values: Stronger in group2 (e.g., HC)
+        
+        Parameters
+        ----------
+        group1, group2 : str
+            Names of groups to compare
+            
+        Returns
+        -------
+        diff : np.ndarray
+            Difference matrix (group1 - group2)
+        """
+        # Find matching groups (case-insensitive partial match)
+        g1_key = None
+        g2_key = None
+        
+        for key in self.group_consensus.keys():
+            if group1.upper() in key.upper():
+                g1_key = key
+            if group2.upper() in key.upper():
+                g2_key = key
+        
+        if g1_key is None or g2_key is None:
+            available = list(self.group_consensus.keys())
+            raise ValueError(f"Groups not found. Available: {available}")
+        
+        # Use weights for difference (more informative than binary consensus)
+        W1 = self.group_weights[g1_key]
+        W2 = self.group_weights[g2_key]
+        
+        self.difference_matrix = W1 - W2
+        
+        return self.difference_matrix
+    
+    def compute_common_backbone(self, 
+                                min_consensus: float = 0.5) -> np.ndarray:
+        """
+        Find edges present in ALL groups (common backbone).
+        
+        This represents the "core" connectivity that is reliable across
+        both AD and HC - useful as a shared graph for comparative analysis.
+        
+        Parameters
+        ----------
+        min_consensus : float
+            Minimum consensus required in EACH group
+            
+        Returns
+        -------
+        backbone : np.ndarray
+            Binary matrix of common edges
+        """
+        if not self.group_consensus:
+            raise ValueError("No groups added yet")
+        
+        first_group = list(self.group_consensus.keys())[0]
+        n_nodes = self.group_consensus[first_group].shape[0]
+        
+        # Start with all edges
+        backbone = np.ones((n_nodes, n_nodes), dtype=bool)
+        
+        # Keep only edges present in ALL groups
+        for C in self.group_consensus.values():
+            backbone &= (C >= min_consensus)
+        
+        np.fill_diagonal(backbone, False)
+        self.common_backbone = backbone.astype(float)
+        
+        return self.common_backbone
+    
+    def get_group_specific_edges(self,
+                                 group_name: str,
+                                 min_consensus: float = 0.5,
+                                 max_other_consensus: float = 0.2) -> np.ndarray:
+        """
+        Find edges specific to one group (present in that group but not others).
+        
+        Parameters
+        ----------
+        group_name : str
+            Group to find specific edges for
+        min_consensus : float
+            Minimum consensus required in target group
+        max_other_consensus : float
+            Maximum consensus allowed in other groups
+            
+        Returns
+        -------
+        specific : np.ndarray
+            Binary matrix of group-specific edges
+        """
+        # Find matching group
+        target_key = None
+        for key in self.group_consensus.keys():
+            if group_name.upper() in key.upper():
+                target_key = key
+                break
+        
+        if target_key is None:
+            raise ValueError(f"Group '{group_name}' not found")
+        
+        C_target = self.group_consensus[target_key]
+        n_nodes = C_target.shape[0]
+        
+        # Edges present in target group
+        specific = C_target >= min_consensus
+        
+        # Remove edges present in other groups
+        for key, C in self.group_consensus.items():
+            if key != target_key:
+                specific &= (C <= max_other_consensus)
+        
+        np.fill_diagonal(specific, False)
+        
+        return specific.astype(float)
+    
+    def analyze_differences(self, 
+                           group1: str = 'AD',
+                           group2: str = 'HC') -> Dict:
+        """
+        Comprehensive analysis of differences between groups.
+        
+        Returns
+        -------
+        dict
+            Analysis results including:
+            - n_stronger_in_group1: Edges stronger in first group
+            - n_stronger_in_group2: Edges stronger in second group
+            - n_common: Edges present in both
+            - top_differences: Most different edges
+        """
+        if self.difference_matrix is None:
+            self.compute_difference_matrix(group1, group2)
+        
+        diff = self.difference_matrix
+        n_nodes = diff.shape[0]
+        triu_idx = np.triu_indices(n_nodes, k=1)
+        diff_values = diff[triu_idx]
+        
+        # Count significant differences
+        threshold = 0.1  # 10% difference in weight
+        n_stronger_g1 = int(np.sum(diff_values > threshold))
+        n_stronger_g2 = int(np.sum(diff_values < -threshold))
+        n_similar = int(np.sum(np.abs(diff_values) <= threshold))
+        
+        # Find top differences
+        sorted_idx = np.argsort(np.abs(diff_values))[::-1][:20]
+        top_edges = []
+        for idx in sorted_idx:
+            i, j = triu_idx[0][idx], triu_idx[1][idx]
+            top_edges.append({
+                'channel_i': int(i),
+                'channel_j': int(j),
+                'difference': float(diff_values[idx]),
+                'direction': f'{group1} > {group2}' if diff_values[idx] > 0 else f'{group2} > {group1}'
+            })
+        
+        # Statistics
+        results = {
+            'n_total_edges': len(diff_values),
+            f'n_stronger_in_{group1}': n_stronger_g1,
+            f'n_stronger_in_{group2}': n_stronger_g2,
+            'n_similar': n_similar,
+            'mean_difference': float(np.mean(diff_values)),
+            'std_difference': float(np.std(diff_values)),
+            'max_difference': float(np.max(diff_values)),
+            'min_difference': float(np.min(diff_values)),
+            'top_20_differences': top_edges
+        }
+        
+        return results
+    
+    def plot_combined_analysis(self,
+                               group1: str = 'AD',
+                               group2: str = 'HC',
+                               save_path: Optional[str] = None) -> plt.Figure:
+        """
+        Create comprehensive visualization of combined consensus analysis.
+        """
+        if self.overall_consensus is None:
+            self.compute_overall_consensus()
+        if self.difference_matrix is None:
+            self.compute_difference_matrix(group1, group2)
+        if self.common_backbone is None:
+            self.compute_common_backbone()
+        
+        fig, axes = plt.subplots(2, 3, figsize=(18, 12))
+        
+        # Row 1: Consensus matrices
+        # Overall consensus
+        vmax = np.max(self.overall_consensus)
+        im1 = axes[0, 0].imshow(self.overall_consensus, cmap='hot', vmin=0, vmax=1)
+        axes[0, 0].set_title(f'Overall Consensus (All Subjects)\n'
+                            f'Total N = {sum(self.group_n_subjects.values())}', fontsize=12)
+        axes[0, 0].set_xlabel('Channel')
+        axes[0, 0].set_ylabel('Channel')
+        plt.colorbar(im1, ax=axes[0, 0], label='Consensus')
+        
+        # Find group keys
+        g1_key = [k for k in self.group_consensus.keys() if group1.upper() in k.upper()][0]
+        g2_key = [k for k in self.group_consensus.keys() if group2.upper() in k.upper()][0]
+        
+        # Group 1 consensus
+        im2 = axes[0, 1].imshow(self.group_consensus[g1_key], cmap='hot', vmin=0, vmax=1)
+        axes[0, 1].set_title(f'{g1_key} Consensus\n'
+                            f'N = {self.group_n_subjects[g1_key]}', fontsize=12)
+        axes[0, 1].set_xlabel('Channel')
+        axes[0, 1].set_ylabel('Channel')
+        plt.colorbar(im2, ax=axes[0, 1], label='Consensus')
+        
+        # Group 2 consensus
+        im3 = axes[0, 2].imshow(self.group_consensus[g2_key], cmap='hot', vmin=0, vmax=1)
+        axes[0, 2].set_title(f'{g2_key} Consensus\n'
+                            f'N = {self.group_n_subjects[g2_key]}', fontsize=12)
+        axes[0, 2].set_xlabel('Channel')
+        axes[0, 2].set_ylabel('Channel')
+        plt.colorbar(im3, ax=axes[0, 2], label='Consensus')
+        
+        # Row 2: Difference and special matrices
+        # Difference matrix (AD - HC)
+        vmax_diff = max(abs(self.difference_matrix.min()), abs(self.difference_matrix.max()))
+        im4 = axes[1, 0].imshow(self.difference_matrix, cmap='RdBu_r', 
+                                vmin=-vmax_diff, vmax=vmax_diff)
+        axes[1, 0].set_title(f'Difference ({group1} - {group2})\n'
+                            f'Red = stronger in {group1}, Blue = stronger in {group2}', 
+                            fontsize=12)
+        axes[1, 0].set_xlabel('Channel')
+        axes[1, 0].set_ylabel('Channel')
+        plt.colorbar(im4, ax=axes[1, 0], label='Weight Difference')
+        
+        # Common backbone
+        im5 = axes[1, 1].imshow(self.common_backbone, cmap='Greens', vmin=0, vmax=1)
+        n_common = int(np.sum(self.common_backbone) / 2)
+        axes[1, 1].set_title(f'Common Backbone\n'
+                            f'(Edges in BOTH groups, N = {n_common})', fontsize=12)
+        axes[1, 1].set_xlabel('Channel')
+        axes[1, 1].set_ylabel('Channel')
+        plt.colorbar(im5, ax=axes[1, 1], label='Present')
+        
+        # Difference histogram
+        n_nodes = self.difference_matrix.shape[0]
+        triu_idx = np.triu_indices(n_nodes, k=1)
+        diff_values = self.difference_matrix[triu_idx]
+        
+        axes[1, 2].hist(diff_values, bins=50, color='purple', alpha=0.7, edgecolor='black')
+        axes[1, 2].axvline(0, color='black', linestyle='--', linewidth=2)
+        axes[1, 2].axvline(np.mean(diff_values), color='red', linestyle='-', 
+                          label=f'Mean = {np.mean(diff_values):.4f}')
+        axes[1, 2].set_xlabel(f'Weight Difference ({group1} - {group2})')
+        axes[1, 2].set_ylabel('Frequency')
+        axes[1, 2].set_title('Distribution of Edge Differences', fontsize=12)
+        axes[1, 2].legend()
+        axes[1, 2].grid(True, alpha=0.3)
+        
+        # Add summary text
+        n_stronger_g1 = np.sum(diff_values > 0.1)
+        n_stronger_g2 = np.sum(diff_values < -0.1)
+        
+        textstr = (f'Edges stronger in {group1}: {n_stronger_g1}\n'
+                  f'Edges stronger in {group2}: {n_stronger_g2}\n'
+                  f'Common backbone edges: {n_common}')
+        props = dict(boxstyle='round', facecolor='wheat', alpha=0.8)
+        axes[1, 2].text(0.98, 0.98, textstr, transform=axes[1, 2].transAxes, fontsize=10,
+                       verticalalignment='top', horizontalalignment='right', bbox=props)
+        
+        plt.suptitle('Combined Consensus Analysis: AD vs HC Connectivity', fontsize=16, y=1.02)
+        plt.tight_layout()
+        
+        if save_path:
+            plt.savefig(save_path, dpi=300, bbox_inches='tight')
+            logger.info(f"Combined analysis figure saved to {save_path}")
+        
+        return fig
+    
+    def generate_report(self, 
+                        output_dir: str,
+                        group1: str = 'AD',
+                        group2: str = 'HC') -> str:
+        """
+        Generate comprehensive report of combined consensus analysis.
+        """
+        output_path = Path(output_dir)
+        output_path.mkdir(parents=True, exist_ok=True)
+        
+        if self.overall_consensus is None:
+            self.compute_overall_consensus()
+        
+        diff_analysis = self.analyze_differences(group1, group2)
+        
+        # Compute sparsity of overall consensus
+        n_nodes = self.overall_consensus.shape[0]
+        triu_idx = np.triu_indices(n_nodes, k=1)
+        n_possible = len(triu_idx[0])
+        overall_values = self.overall_consensus[triu_idx]
+        n_present = int(np.sum(overall_values > 0))
+        overall_sparsity = (n_present / n_possible) * 100
+        
+        # Common backbone stats
+        if self.common_backbone is None:
+            self.compute_common_backbone()
+        n_common = int(np.sum(self.common_backbone) / 2)
+        
+        lines = [
+            "# Combined Consensus Analysis Report",
+            "",
+            "## Overview",
+            "",
+            "This analysis combines subjects from multiple groups to create:",
+            "1. **Overall Consensus**: Connectivity present across ALL subjects",
+            "2. **Group Differences**: Which connections differ between AD and HC",
+            "3. **Common Backbone**: Reliable connections present in BOTH groups",
+            "",
+            "## Sample Sizes",
+            ""
+        ]
+        
+        for group_name, n in self.group_n_subjects.items():
+            lines.append(f"- {group_name}: N = {n}")
+        lines.append(f"- **Total: N = {sum(self.group_n_subjects.values())}**")
+        
+        lines.extend([
+            "",
+            "## Overall Consensus Statistics",
+            "",
+            f"- Total possible edges: {n_possible}",
+            f"- Edges with any presence (C > 0): {n_present}",
+            f"- **Overall natural sparsity: {overall_sparsity:.2f}%**",
+            f"- Mean consensus value: {np.mean(overall_values):.4f}",
+            f"- Edges with full consensus (C = 1): {int(np.sum(overall_values >= 0.999))}",
+            "",
+            "## Group Differences",
+            "",
+            f"- Edges stronger in {group1} (diff > 0.1): {diff_analysis[f'n_stronger_in_{group1}']}",
+            f"- Edges stronger in {group2} (diff < -0.1): {diff_analysis[f'n_stronger_in_{group2}']}",
+            f"- Similar edges (|diff| ≤ 0.1): {diff_analysis['n_similar']}",
+            f"- Mean difference ({group1} - {group2}): {diff_analysis['mean_difference']:.4f}",
+            "",
+            "## Common Backbone",
+            "",
+            f"- Edges present in BOTH groups (C ≥ 0.5): {n_common}",
+            f"- Backbone sparsity: {(n_common / n_possible) * 100:.2f}%",
+            "",
+            "This common backbone can be used as a shared graph structure for comparative GP-VAR analysis.",
+            "",
+            "## Top 10 Most Different Edges",
+            "",
+            "| Channel i | Channel j | Difference | Direction |",
+            "|-----------|-----------|------------|-----------|"
+        ])
+        
+        for edge in diff_analysis['top_20_differences'][:10]:
+            lines.append(f"| {edge['channel_i']} | {edge['channel_j']} | "
+                        f"{edge['difference']:.4f} | {edge['direction']} |")
+        
+        lines.extend([
+            "",
+            "## Interpretation for AD Research",
+            "",
+            f"The difference analysis reveals that {diff_analysis[f'n_stronger_in_{group2}']} edges are "
+            f"stronger in {group2} compared to {group1}, consistent with the disconnection hypothesis of AD. "
+            f"The common backbone of {n_common} edges represents reliable connectivity patterns "
+            f"that can serve as a reference for identifying AD-specific disruptions.",
+            "",
+            "### Key Findings:",
+            f"- **Overall connectivity**: {n_present} edges across all subjects",
+            f"- **{group1}-specific reductions**: {diff_analysis[f'n_stronger_in_{group2}']} edges weaker in {group1}",
+            f"- **Preserved connectivity**: {n_common} edges maintained in both groups",
+            ""
+        ])
+        
+        report_path = output_path / "combined_consensus_report.md"
+        report_path.write_text("\n".join(lines))
+        
+        return str(report_path)
+
+
+def create_combined_consensus(results_dir: str,
+                              output_dir: Optional[str] = None,
+                              ad_pattern: str = 'AD',
+                              hc_pattern: str = 'HC') -> CombinedConsensusAnalyzer:
+    """
+    Create combined consensus from AD and HC groups.
+    
+    Parameters
+    ----------
+    results_dir : str
+        Directory containing separate group results
+    output_dir : str, optional
+        Output directory for combined analysis
+    ad_pattern : str
+        Pattern to identify AD groups
+    hc_pattern : str
+        Pattern to identify HC groups
+        
+    Returns
+    -------
+    CombinedConsensusAnalyzer
+        Analyzer with combined results
+    """
+    if output_dir is None:
+        output_dir = str(Path(results_dir) / "combined_analysis")
+    
+    output_path = Path(output_dir)
+    output_path.mkdir(parents=True, exist_ok=True)
+    
+    # Load individual group results
+    analyzer = ConsensusResultsAnalyzer(results_dir)
+    analyzer.load_results()
+    
+    # Create combined analyzer
+    combined = CombinedConsensusAnalyzer()
+    
+    # Add each group
+    for group_name in analyzer.consensus_matrices.keys():
+        C = analyzer.consensus_matrices[group_name]
+        W = analyzer.weight_matrices.get(group_name, C)  # Use C if W not available
+        
+        # Estimate n_subjects from binary matrices if available
+        if group_name in analyzer.binary_matrices:
+            n_subjects = analyzer.binary_matrices[group_name].shape[0]
+        else:
+            n_subjects = 1  # Default if unknown
+        
+        combined.add_group(group_name, C, W, n_subjects)
+    
+    # Compute combined results
+    combined.compute_overall_consensus()
+    combined.compute_difference_matrix(ad_pattern, hc_pattern)
+    combined.compute_common_backbone()
+    
+    # Generate outputs
+    combined.plot_combined_analysis(ad_pattern, hc_pattern,
+                                   save_path=str(output_path / "combined_consensus_analysis.png"))
+    plt.close()
+    
+    combined.generate_report(output_dir, ad_pattern, hc_pattern)
+    
+    # Save matrices
+    np.save(output_path / "overall_consensus_C.npy", combined.overall_consensus)
+    np.save(output_path / "overall_weights_W.npy", combined.overall_weights)
+    np.save(output_path / "difference_matrix.npy", combined.difference_matrix)
+    np.save(output_path / "common_backbone.npy", combined.common_backbone)
+    
+    logger.info(f"Combined consensus analysis saved to {output_dir}")
+    
+    return combined
+
+
+# ============================================================================
 # Convenience Functions
 # ============================================================================
 
