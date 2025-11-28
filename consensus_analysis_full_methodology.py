@@ -217,19 +217,96 @@ def step4_compute_weights(adjacency_matrices: np.ndarray,
     return W
 
 
+def step5_natural_sparsity_selection(C: np.ndarray, 
+                                      W: np.ndarray,
+                                      W_full: np.ndarray = None,
+                                      min_consensus: float = 0.0) -> Tuple[np.ndarray, Dict]:
+    """
+    STEP 5: NATURAL SPARSITY - Keep all edges where consensus > 0.
+    
+    NO artificial sparsity cutoff!
+    The sparsity emerges NATURALLY from the consensus process:
+    - Edges present in at least one subject are kept
+    - Sparsity reflects true agreement across subjects
+    
+    This is critical for:
+    - Graph frequency spectrum analysis
+    - GP-VAR models
+    - Preserving network topology
+    
+    Parameters
+    ----------
+    C : np.ndarray
+        Consensus matrix (fraction of subjects with each edge)
+    W : np.ndarray
+        Weight matrix (Fisher-z averaged, conditional on edge existence)
+    W_full : np.ndarray, optional
+        Dense weight matrix (Fisher-z averaged across ALL subjects)
+        If provided, used for edge weights
+    min_consensus : float
+        Minimum consensus threshold (default 0 = any subject)
+        Set to 0.5 for majority consensus, etc.
+        
+    Returns
+    -------
+    G : np.ndarray
+        Final graph with NATURAL sparsity
+    selection_info : dict
+        Information about natural sparsity
+    """
+    n_channels = C.shape[0]
+    triu_idx = np.triu_indices(n_channels, k=1)
+    n_possible = len(triu_idx[0])
+    
+    # Use full weight matrix if available, otherwise use conditional weights
+    weight_source = W_full if W_full is not None else W
+    
+    # NATURAL SELECTION: Keep ALL edges where consensus > min_consensus
+    # NO artificial cutoff!
+    mask = C > min_consensus
+    mask = mask & (weight_source > 0)
+    np.fill_diagonal(mask, False)
+    
+    # Build final graph
+    G = np.where(mask, weight_source, 0.0)
+    G = np.maximum(G, G.T)  # Ensure symmetry
+    
+    # Compute statistics
+    n_selected = int(np.sum(np.triu(G > 0, k=1)))
+    natural_sparsity = n_selected / n_possible
+    
+    # Analyze consensus distribution of selected edges
+    selected_consensus = C[triu_idx][G[triu_idx] > 0]
+    
+    selection_info = {
+        'method': 'NATURAL_SPARSITY',
+        'artificial_cutoff': False,
+        'min_consensus_threshold': min_consensus,
+        'n_possible_edges': n_possible,
+        'n_selected_edges': n_selected,
+        'natural_sparsity_percent': natural_sparsity * 100,
+        'consensus_mean': float(np.mean(selected_consensus)) if len(selected_consensus) > 0 else 0,
+        'consensus_min': float(np.min(selected_consensus)) if len(selected_consensus) > 0 else 0,
+        'consensus_max': float(np.max(selected_consensus)) if len(selected_consensus) > 0 else 0,
+        'edges_unanimous': int(np.sum(selected_consensus >= 0.99)),
+        'edges_majority': int(np.sum(selected_consensus > 0.5)),
+        'edges_any': int(np.sum(selected_consensus > 0)),
+    }
+    
+    return G, selection_info
+
+
 def step5_distance_dependent_selection(C: np.ndarray, 
                                        W: np.ndarray,
                                        channel_locations: np.ndarray,
-                                       target_sparsity: float,
+                                       target_sparsity: float = None,
                                        n_bins: int = 10,
                                        epsilon: float = 0.1) -> Tuple[np.ndarray, Dict]:
     """
-    STEP 5: Distance-dependent edge selection (Betzel-style bins).
+    STEP 5 (Alternative): Distance-dependent edge selection (Betzel-style bins).
     
-    1. Compute Euclidean distances between channels
-    2. Divide into n_bins based on distance percentiles
-    3. For each bin, select top edges based on score = C + ε×W
-    4. Distribute target edges across bins
+    NOTE: Use step5_natural_sparsity_selection() for NATURAL sparsity!
+    This function is for when you need a specific target sparsity.
     
     Parameters
     ----------
@@ -239,8 +316,8 @@ def step5_distance_dependent_selection(C: np.ndarray,
         Weight matrix
     channel_locations : np.ndarray
         3D coordinates (n_channels × 3)
-    target_sparsity : float
-        Target fraction of edges to keep
+    target_sparsity : float, optional
+        Target fraction of edges. If None, uses natural sparsity.
     n_bins : int
         Number of distance bins
     epsilon : float
@@ -251,8 +328,12 @@ def step5_distance_dependent_selection(C: np.ndarray,
     G : np.ndarray
         Final graph adjacency matrix
     selection_info : dict
-        Information about edge selection per bin
+        Information about edge selection
     """
+    # If no target sparsity, use NATURAL sparsity
+    if target_sparsity is None:
+        return step5_natural_sparsity_selection(C, W)
+    
     n_channels = C.shape[0]
     triu_idx = np.triu_indices(n_channels, k=1)
     n_possible = len(triu_idx[0])
@@ -274,7 +355,7 @@ def step5_distance_dependent_selection(C: np.ndarray,
     # Initialize
     G = np.zeros((n_channels, n_channels))
     selected_edges = set()
-    selection_info = {'bins': [], 'total_selected': 0}
+    selection_info = {'bins': [], 'total_selected': 0, 'method': 'DISTANCE_DEPENDENT'}
     
     # Process each bin
     for bin_idx in range(n_bins):
@@ -321,6 +402,7 @@ def step5_distance_dependent_selection(C: np.ndarray,
     
     selection_info['total_selected'] = len(selected_edges)
     selection_info['target'] = k_target
+    selection_info['artificial_cutoff'] = True
     
     return G, selection_info
 
@@ -735,24 +817,81 @@ def plot_distance_bin_analysis(C: np.ndarray,
 
 def generate_methodology_report(n_ad: int, n_hc: int, n_channels: int,
                                 sparsity_binarize: float, 
-                                sparsity_final: float,
-                                n_bins: int,
+                                use_natural_sparsity: bool = True,
+                                selection_info: dict = None,
                                 save_path: str = None) -> str:
     """Generate detailed methodology report."""
     
     n_total = n_ad + n_hc
     n_possible = n_channels * (n_channels - 1) // 2
     
+    # Get sparsity info
+    if selection_info and use_natural_sparsity:
+        final_sparsity_pct = selection_info.get('natural_sparsity_percent', 'N/A')
+        n_selected = selection_info.get('n_selected_edges', 'N/A')
+        edges_unanimous = selection_info.get('edges_unanimous', 'N/A')
+        edges_majority = selection_info.get('edges_majority', 'N/A')
+    else:
+        final_sparsity_pct = 'N/A'
+        n_selected = 'N/A'
+        edges_unanimous = 'N/A'
+        edges_majority = 'N/A'
+    
+    sparsity_section = f"""
+STEP 5: NATURAL SPARSITY (No Artificial Cutoff)
+-----------------------------------------------
+  
+  *** THIS IS THE KEY DIFFERENCE FROM TYPICAL APPROACHES ***
+  
+  NATURAL SPARSITY means:
+    • Keep ALL edges where consensus C[i,j] > 0
+    • NO arbitrary percentage cutoff (e.g., NOT "keep only 10%")
+    • Sparsity emerges NATURALLY from the consensus process
+  
+  Final graph includes edge (i,j) if:
+    • At least ONE subject has this edge (C[i,j] > 0)
+    • The edge has valid weight (W[i,j] > 0)
+  
+  WHY NATURAL SPARSITY?
+    ✓ Preserves true network topology
+    ✓ Critical for valid graph frequency spectrum
+    ✓ Required for GP-VAR analysis
+    ✓ No arbitrary information loss
+    ✓ Sparsity reflects actual subject agreement
+  
+  RESULTS:
+    • Possible edges: {n_possible:,}
+    • Selected edges: {n_selected}
+    • Natural sparsity: {final_sparsity_pct:.2f}% (NOT artificially imposed!)
+    • Edges with unanimous consensus (100%): {edges_unanimous}
+    • Edges with majority consensus (>50%): {edges_majority}
+""" if use_natural_sparsity else f"""
+STEP 5: Distance-Dependent Edge Selection (Betzel-style)
+---------------------------------------------------------
+  
+  1. Compute Euclidean distance D[i,j] from 3D channel coordinates
+  2. Divide distances into bins (percentile-based)
+  3. Select top edges from EACH bin based on score:
+  
+     Score[i,j] = C[i,j] + 0.1 × W[i,j]
+     
+  4. Artificial sparsity is IMPOSED (e.g., 10%)
+  
+  WARNING: This may lose important connections!
+"""
+    
     report = f"""
 ================================================================================
-        DISTANCE-DEPENDENT CONSENSUS MATRIX METHODOLOGY REPORT
-                      (Betzel-Style Implementation)
+        CONSENSUS MATRIX METHODOLOGY REPORT
+                (Betzel-Style Implementation)
 ================================================================================
 
 OVERVIEW
 --------
 This analysis builds group-representative brain connectivity networks using
-the distance-dependent consensus approach (Betzel et al., 2019).
+the consensus approach (Betzel et al., 2019).
+
+*** SPARSITY MODE: {'NATURAL (recommended for GP-VAR)' if use_natural_sparsity else 'ARTIFICIAL'} ***
 
 SAMPLE
 ------
@@ -774,6 +913,7 @@ STEP 1: Per-Subject Correlation Matrices
     
   • Absolute value used to capture both positive and negative correlations
   • Diagonal set to 0 (no self-connections)
+  • OUTPUT: DENSE matrix (all edges have values)
 
 STEP 2: Proportional Thresholding → Binary Matrices
 ---------------------------------------------------
@@ -784,6 +924,7 @@ STEP 2: Proportional Thresholding → Binary Matrices
     
   • Sparsity κ = {sparsity_binarize} ({sparsity_binarize*100:.0f}% of edges kept per subject)
   • Ensures comparable density across subjects
+  • OUTPUT: SPARSE binary matrix (~{sparsity_binarize*100:.0f}% edges per subject)
 
 STEP 3: Consensus Matrix C
 --------------------------
@@ -792,6 +933,7 @@ STEP 3: Consensus Matrix C
   • C[i,j] = fraction of subjects with edge (i,j)
   • Range: 0 (no subjects) to 1 (all subjects)
   • High consensus = consistent connection across subjects
+  • OUTPUT: Values 0-1 for each edge
 
 STEP 4: Weight Matrix W (Fisher-z averaging)
 --------------------------------------------
@@ -803,49 +945,32 @@ STEP 4: Weight Matrix W (Fisher-z averaging)
   • Fisher z-transform handles non-normality of correlations
   • Averaging in z-space, then back-transform
   • W represents typical correlation strength for each edge
-
-STEP 5: Distance-Dependent Edge Selection
------------------------------------------
-  Using Betzel-style bins:
-  
-  1. Compute Euclidean distance D[i,j] from 3D channel coordinates
-  2. Divide distances into {n_bins} bins (percentile-based)
-  3. Target edges per bin = ({sparsity_final*100:.0f}% × {n_possible:,}) / {n_bins}
-  4. For each bin, select edges with highest score:
-  
-     Score[i,j] = C[i,j] + 0.1 × W[i,j]
-     
-  5. Selected edges span ALL distance ranges
-
+{sparsity_section}
 STEP 6: Final Graph G
 ---------------------
   G[i,j] = W[i,j]  for selected edges
          = 0       otherwise
-  
-  • Final sparsity: {sparsity_final*100:.0f}%
-  • Target edges: {int(sparsity_final * n_possible):,}
 
 ================================================================================
-                    WHY DISTANCE-DEPENDENT SELECTION?
+              WHY NATURAL SPARSITY IS CRITICAL FOR GP-VAR
 ================================================================================
 
-PROBLEM: Global selection is biased
------------------------------------
-  • Short-range connections have higher correlation (volume conduction)
-  • Simply selecting top-K edges globally → mostly short-range
-  • Long-range connections (important for integration) are lost
+The graph frequency spectrum (eigenvalues of the Laplacian) is used by GP-VAR
+models to decompose signals into graph frequency components.
 
-SOLUTION: Betzel-style distance bins
-------------------------------------
-  • Divide edges into distance-based bins
-  • Select top edges FROM EACH BIN
-  • Ensures representation across ALL distances
-  
-BENEFITS:
-  ✓ Preserves local connectivity (segregation)
-  ✓ Preserves long-range connectivity (integration)
-  ✓ More representative of true brain network topology
-  ✓ Better for graph frequency spectrum analysis (GP-VAR)
+PROBLEM with artificial sparsity:
+---------------------------------
+  • Cutting at arbitrary % (e.g., 10%) removes valid edges
+  • Changes the Laplacian eigenvalues
+  • Distorts the graph frequency spectrum
+  • GP-VAR results become unreliable
+
+SOLUTION with natural sparsity:
+-------------------------------
+  • Sparsity emerges from subject agreement
+  • All edges with ANY consensus are kept
+  • Graph structure reflects true connectivity
+  • Valid graph frequency spectrum for GP-VAR
 
 ================================================================================
                          OVERALL CONSENSUS
@@ -950,13 +1075,33 @@ def run_full_methodology_demo(n_ad: int = 35,
                               n_channels: int = 64,
                               n_samples: int = 1000,
                               sparsity_binarize: float = 0.15,
-                              sparsity_final: float = 0.10,
+                              use_natural_sparsity: bool = True,
                               n_bins: int = 10):
     """
     Run the complete methodology demonstration.
+    
+    Parameters
+    ----------
+    n_ad : int
+        Number of AD subjects
+    n_hc : int
+        Number of HC subjects
+    n_channels : int
+        Number of EEG channels
+    n_samples : int
+        Number of time samples per subject
+    sparsity_binarize : float
+        Sparsity for per-subject binarization (Step 2)
+    use_natural_sparsity : bool
+        If True (default), use NATURAL sparsity - no artificial cutoff
+        If False, use distance-dependent selection with fixed sparsity
+    n_bins : int
+        Number of distance bins (only used if use_natural_sparsity=False)
     """
     print("="*70)
-    print("   DISTANCE-DEPENDENT CONSENSUS METHODOLOGY DEMONSTRATION")
+    print("   CONSENSUS MATRIX METHODOLOGY DEMONSTRATION")
+    print("="*70)
+    print(f"\n   SPARSITY MODE: {'NATURAL (no artificial cutoff)' if use_natural_sparsity else 'ARTIFICIAL (fixed %)'}")
     print("="*70)
     
     # Generate synthetic data
@@ -1000,11 +1145,21 @@ def run_full_methodology_demo(n_ad: int = 35,
     print("\n[5/7] STEP 4: Computing weight matrix (Fisher-z)...")
     print(f"  ✓ Overall weight mean: {np.mean(W_overall):.4f}")
     
-    # STEP 5-6: Distance-dependent selection and final graph
-    print(f"\n[6/7] STEP 5-6: Distance-dependent selection (n_bins={n_bins}, target={sparsity_final})...")
-    G_final, selection_info = step5_distance_dependent_selection(
-        C_overall, W_overall, channel_locations, sparsity_final, n_bins)
-    print(f"  ✓ Selected {selection_info['total_selected']} edges (target: {selection_info['target']})")
+    # STEP 5-6: NATURAL SPARSITY selection
+    print(f"\n[6/7] STEP 5-6: Building final graph...")
+    
+    if use_natural_sparsity:
+        print("  → Using NATURAL SPARSITY (keeping all edges where consensus > 0)")
+        G_final, selection_info = step5_natural_sparsity_selection(C_overall, W_overall)
+        print(f"  ✓ NATURAL sparsity: {selection_info['natural_sparsity_percent']:.2f}%")
+        print(f"  ✓ Selected {selection_info['n_selected_edges']} edges (out of {selection_info['n_possible_edges']} possible)")
+        print(f"  ✓ Edges with unanimous consensus (100%): {selection_info['edges_unanimous']}")
+        print(f"  ✓ Edges with majority consensus (>50%): {selection_info['edges_majority']}")
+    else:
+        print(f"  → Using ARTIFICIAL sparsity with distance-dependent bins")
+        G_final, selection_info = step5_distance_dependent_selection(
+            C_overall, W_overall, channel_locations, target_sparsity=0.10, n_bins=n_bins)
+        print(f"  ✓ Selected {selection_info['total_selected']} edges (target: {selection_info['target']})")
     
     # Generate outputs
     print("\n[7/7] Generating outputs...")
@@ -1029,8 +1184,10 @@ def run_full_methodology_demo(n_ad: int = 35,
     
     # Methodology report
     generate_methodology_report(
-        n_ad, n_hc, n_channels, sparsity_binarize, sparsity_final, n_bins,
-        str(OUTPUT_DIR / "4_methodology_report.txt")
+        n_ad, n_hc, n_channels, sparsity_binarize, 
+        use_natural_sparsity=use_natural_sparsity,
+        selection_info=selection_info,
+        save_path=str(OUTPUT_DIR / "4_methodology_report.txt")
     )
     
     # Save matrices
@@ -1078,7 +1235,7 @@ if __name__ == "__main__":
         n_hc=31,
         n_channels=64,
         n_samples=1000,
-        sparsity_binarize=0.15,
-        sparsity_final=0.10,
+        sparsity_binarize=0.15,        # Per-subject binarization (Step 2)
+        use_natural_sparsity=True,      # NATURAL sparsity - NO artificial cutoff!
         n_bins=10
     )
