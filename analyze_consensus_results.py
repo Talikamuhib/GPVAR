@@ -61,11 +61,28 @@ Sparse connectivity matrices are crucial for AD research for several reasons:
    - Dense "hairball" networks provide no actionable insights
    - Sparse hubs and modules map to known anatomical/functional systems
 
-RECOMMENDED SPARSITY LEVELS FOR AD RESEARCH:
+RECOMMENDED SPARSITY APPROACH FOR AD RESEARCH:
 - Individual subject binarization: 10-20% (sparsity_binarize=0.15)
-- Final consensus graph: 5-15% (sparsity_final=0.10)
-- These values balance sensitivity to detect AD-related changes with
-  specificity to exclude noise
+- Final consensus graph: USE NATURAL SPARSITY (sparsity_final=None or "match_subject")
+  
+  IMPORTANT: Do NOT artificially cut off at a fixed percentage (e.g., 10%)!
+  The consensus process naturally produces sparse networks by:
+  1. Only retaining edges present across multiple subjects
+  2. Distance-dependent selection preserves anatomically meaningful connections
+  3. The resulting "natural" sparsity reflects true group-level connectivity
+  
+  Artificial thresholding can:
+  - Remove clinically meaningful weak connections
+  - Introduce arbitrary bias in group comparisons
+  - Distort the graph frequency spectrum used in GP-VAR analysis
+
+8. GRAPH FREQUENCY SPECTRUM (Critical for GP-VAR Analysis)
+   - The consensus Laplacian's eigenvalues define the graph frequency spectrum
+   - GP-VAR models use this spectrum for spectral filtering on graphs
+   - Artificially sparse networks distort the spectrum
+   - Natural sparsity preserves the true frequency content of brain networks
+   - The algebraic connectivity (λ₂) determines network integration
+   - Higher eigenvalues capture local, high-frequency variation
 
 REFERENCES:
 - Delbeuck et al. (2003) "Alzheimer's disease as a disconnection syndrome"
@@ -234,6 +251,60 @@ class SparsityMetrics:
     edges_above_threshold: int = 0
 
 
+@dataclass
+class GraphFrequencyMetrics:
+    """
+    Container for graph frequency spectrum analysis.
+    
+    CRITICAL FOR GP-VAR AND GRAPH SIGNAL PROCESSING:
+    
+    The consensus Laplacian L = D - A defines the graph frequency domain:
+    - Eigenvalues λ₀ ≤ λ₁ ≤ ... ≤ λₙ₋₁ are the graph frequencies
+    - Eigenvectors form the Graph Fourier Transform (GFT) basis
+    - Low frequencies (small λ) = smooth signals across connected nodes
+    - High frequencies (large λ) = rapid variation between neighbors
+    
+    For AD Analysis:
+    - AD disrupts low-frequency (global) integration
+    - Local high-frequency processing may be preserved/compensatory
+    - The spectrum shape reflects network organization
+    - GP-VAR uses this spectrum for time-varying graph filtering
+    """
+    # Eigenvalue distribution
+    eigenvalues: np.ndarray = field(default_factory=lambda: np.array([]))
+    n_eigenvalues: int = 0
+    
+    # Key spectral landmarks
+    lambda_min: float = 0.0  # Should be ~0 for connected graph
+    lambda_2: float = 0.0  # Algebraic connectivity (Fiedler value)
+    lambda_max: float = 0.0  # Spectral radius
+    lambda_median: float = 0.0
+    lambda_mean: float = 0.0
+    
+    # Spectral distribution
+    spectral_gap: float = 0.0  # λ₂ - λ₁ (connectivity measure)
+    spectral_range: float = 0.0  # λ_max - λ_min
+    spectral_variance: float = 0.0
+    
+    # Frequency band analysis (like EEG bands but for graph)
+    low_freq_energy: float = 0.0  # Energy in lowest 25% of spectrum
+    mid_freq_energy: float = 0.0  # Energy in middle 50%
+    high_freq_energy: float = 0.0  # Energy in highest 25%
+    low_high_ratio: float = 0.0  # Balance between global and local
+    
+    # Connectivity indicators
+    n_zero_eigenvalues: int = 0  # Number of connected components
+    algebraic_connectivity: float = 0.0  # λ₂ - key for network integration
+    
+    # Graph filter properties (for GP-VAR)
+    effective_bandwidth: float = 0.0  # Useful frequency range
+    spectral_entropy: float = 0.0  # Uniformity of spectrum
+    
+    # Eigenvector properties
+    fiedler_vector: np.ndarray = field(default_factory=lambda: np.array([]))
+    fiedler_bipartition: np.ndarray = field(default_factory=lambda: np.array([]))  # Binary partition
+
+
 @dataclass  
 class ADConnectivityMetrics:
     """
@@ -314,6 +385,7 @@ class ConsensusResultsAnalyzer:
         self.spectral_metrics: Dict[str, SpectralMetrics] = {}
         self.sparsity_metrics: Dict[str, SparsityMetrics] = {}
         self.ad_metrics: Dict[str, ADConnectivityMetrics] = {}
+        self.graph_frequency_metrics: Dict[str, GraphFrequencyMetrics] = {}
         
     def load_results(self, results_dir: Optional[str] = None) -> None:
         """
@@ -510,6 +582,9 @@ class ConsensusResultsAnalyzer:
             self.ad_metrics[group_name] = self._compute_ad_metrics(
                 G_matrix, G_nx, self.channel_locations
             )
+            
+            # Compute graph frequency spectrum metrics (CRITICAL for GP-VAR)
+            self.graph_frequency_metrics[group_name] = self._compute_graph_frequency_metrics(G_matrix)
         
         logger.info("Metric computation complete")
     
@@ -1030,6 +1105,119 @@ class ConsensusResultsAnalyzer:
         
         return float(np.mean(robustness_scores))
     
+    def _compute_graph_frequency_metrics(self, adjacency: np.ndarray) -> GraphFrequencyMetrics:
+        """
+        Compute graph frequency spectrum analysis.
+        
+        CRITICAL FOR GP-VAR AND GRAPH SIGNAL PROCESSING:
+        
+        The consensus matrix defines a graph Laplacian whose eigenvalues form
+        the graph frequency spectrum. This is analogous to temporal frequencies
+        in traditional signal processing, but defined over the graph structure.
+        
+        For AD Analysis:
+        - Low graph frequencies represent global, smooth patterns across the brain
+        - High graph frequencies capture local, rapid variations between neighbors
+        - AD typically shows disrupted low-frequency (integration) with preserved
+          high-frequency (local) processing
+        - The spectrum shape is used by GP-VAR for graph-based filtering
+        
+        IMPORTANT: Natural sparsity preserves the true spectrum!
+        Artificial thresholding distorts these frequencies.
+        
+        Parameters
+        ----------
+        adjacency : np.ndarray
+            Consensus adjacency matrix (use NATURAL sparsity, not artificial cutoff)
+            
+        Returns
+        -------
+        GraphFrequencyMetrics
+            Complete graph frequency analysis
+        """
+        metrics = GraphFrequencyMetrics()
+        n_nodes = adjacency.shape[0]
+        
+        if n_nodes == 0:
+            return metrics
+        
+        # Compute graph Laplacian: L = D - A
+        # D = diagonal degree matrix, A = adjacency
+        strengths = np.sum(adjacency, axis=1)
+        laplacian = np.diag(strengths) - adjacency
+        
+        # Eigendecomposition (eigenvalues are graph frequencies)
+        eigenvalues, eigenvectors = np.linalg.eigh(laplacian)
+        
+        # Sort eigenvalues (should already be sorted, but ensure)
+        sort_idx = np.argsort(eigenvalues)
+        eigenvalues = eigenvalues[sort_idx]
+        eigenvectors = eigenvectors[:, sort_idx]
+        
+        metrics.eigenvalues = eigenvalues
+        metrics.n_eigenvalues = len(eigenvalues)
+        
+        # Key spectral landmarks
+        metrics.lambda_min = float(eigenvalues[0])
+        metrics.lambda_max = float(eigenvalues[-1])
+        metrics.lambda_mean = float(np.mean(eigenvalues))
+        metrics.lambda_median = float(np.median(eigenvalues))
+        
+        if len(eigenvalues) > 1:
+            metrics.lambda_2 = float(eigenvalues[1])  # Algebraic connectivity
+            metrics.algebraic_connectivity = metrics.lambda_2
+            metrics.spectral_gap = float(eigenvalues[1] - eigenvalues[0])
+        
+        metrics.spectral_range = metrics.lambda_max - metrics.lambda_min
+        metrics.spectral_variance = float(np.var(eigenvalues))
+        
+        # Count zero eigenvalues (indicates connected components)
+        metrics.n_zero_eigenvalues = int(np.sum(eigenvalues < 1e-10))
+        
+        # Frequency band analysis (analogous to EEG frequency bands)
+        # Divide spectrum into low (global), mid, and high (local) frequencies
+        n_eig = len(eigenvalues)
+        low_idx = n_eig // 4
+        high_idx = 3 * n_eig // 4
+        
+        # Energy in each band (sum of squared eigenvalues)
+        low_eigs = eigenvalues[:low_idx] if low_idx > 0 else eigenvalues[:1]
+        mid_eigs = eigenvalues[low_idx:high_idx] if high_idx > low_idx else eigenvalues
+        high_eigs = eigenvalues[high_idx:] if high_idx < n_eig else eigenvalues[-1:]
+        
+        metrics.low_freq_energy = float(np.sum(low_eigs ** 2))
+        metrics.mid_freq_energy = float(np.sum(mid_eigs ** 2))
+        metrics.high_freq_energy = float(np.sum(high_eigs ** 2))
+        
+        if metrics.high_freq_energy > 0:
+            metrics.low_high_ratio = metrics.low_freq_energy / metrics.high_freq_energy
+        
+        # Effective bandwidth (range containing 90% of spectral energy)
+        total_energy = np.sum(eigenvalues ** 2)
+        if total_energy > 0:
+            cumulative_energy = np.cumsum(eigenvalues ** 2) / total_energy
+            # Find 5% and 95% points
+            idx_5 = np.searchsorted(cumulative_energy, 0.05)
+            idx_95 = np.searchsorted(cumulative_energy, 0.95)
+            if idx_95 < len(eigenvalues) and idx_5 < len(eigenvalues):
+                metrics.effective_bandwidth = float(eigenvalues[idx_95] - eigenvalues[idx_5])
+        
+        # Spectral entropy (uniformity of spectrum - higher = more uniform)
+        positive_eigs = eigenvalues[eigenvalues > 1e-10]
+        if len(positive_eigs) > 0:
+            # Normalize to probability distribution
+            p = positive_eigs / np.sum(positive_eigs)
+            # Shannon entropy
+            metrics.spectral_entropy = float(-np.sum(p * np.log(p + 1e-10)))
+        
+        # Fiedler vector (eigenvector of λ₂ - used for graph partitioning)
+        if len(eigenvalues) > 1:
+            metrics.fiedler_vector = eigenvectors[:, 1]
+            # Binary partition based on Fiedler vector sign
+            metrics.fiedler_bipartition = (metrics.fiedler_vector >= 0).astype(int)
+        
+        return metrics
+    
     # ========================================================================
     # Group Comparisons
     # ========================================================================
@@ -1486,6 +1674,140 @@ class ConsensusResultsAnalyzer:
         
         return fig
     
+    def plot_graph_frequency_spectrum(self,
+                                      group_name: str,
+                                      ax: Optional[plt.Axes] = None,
+                                      show_bands: bool = True,
+                                      color: str = 'steelblue') -> plt.Figure:
+        """
+        Plot the graph frequency spectrum (Laplacian eigenvalues).
+        
+        This is CRITICAL for understanding GP-VAR behavior on the consensus graph.
+        
+        Parameters
+        ----------
+        group_name : str
+            Name of the group
+        ax : plt.Axes, optional
+            Axes to plot on
+        show_bands : bool
+            If True, show low/mid/high frequency bands
+        color : str
+            Line color
+            
+        Returns
+        -------
+        plt.Figure
+        """
+        if group_name not in self.graph_frequency_metrics:
+            raise ValueError(f"Graph frequency metrics not computed for '{group_name}'")
+        
+        gf = self.graph_frequency_metrics[group_name]
+        eigenvalues = gf.eigenvalues
+        
+        if ax is None:
+            fig, ax = plt.subplots(figsize=(12, 6))
+        else:
+            fig = ax.figure
+        
+        n_eig = len(eigenvalues)
+        x = np.arange(n_eig)
+        
+        # Main spectrum plot
+        ax.plot(x, eigenvalues, color=color, marker='o', markersize=3, 
+                linewidth=1.5, label='Graph Frequencies (λ)')
+        
+        # Mark key eigenvalues
+        ax.axhline(gf.lambda_2, color='red', linestyle='--', alpha=0.7,
+                   label=f'λ₂ (Algebraic Connectivity) = {gf.lambda_2:.4f}')
+        ax.axhline(gf.lambda_max, color='orange', linestyle=':', alpha=0.7,
+                   label=f'λ_max (Spectral Radius) = {gf.lambda_max:.2f}')
+        
+        if show_bands:
+            # Show frequency bands
+            low_idx = n_eig // 4
+            high_idx = 3 * n_eig // 4
+            
+            ax.axvspan(0, low_idx, alpha=0.1, color='blue', 
+                      label='Low freq (global)')
+            ax.axvspan(low_idx, high_idx, alpha=0.1, color='green',
+                      label='Mid freq')
+            ax.axvspan(high_idx, n_eig, alpha=0.1, color='red',
+                      label='High freq (local)')
+        
+        ax.set_xlabel('Eigenvalue Index', fontsize=12)
+        ax.set_ylabel('λ (Graph Frequency)', fontsize=12)
+        ax.set_title(f'{group_name} - Graph Frequency Spectrum\n'
+                    f'(Laplacian Eigenvalues for GP-VAR)', fontsize=14)
+        ax.legend(loc='upper left', fontsize=9)
+        ax.grid(True, alpha=0.3)
+        
+        # Add text annotation
+        sp = self.sparsity_metrics.get(group_name, SparsityMetrics())
+        textstr = (f'Natural Sparsity: {sp.sparsity_percent:.1f}%\n'
+                  f'Spectral Entropy: {gf.spectral_entropy:.3f}\n'
+                  f'Low/High Ratio: {gf.low_high_ratio:.3f}')
+        props = dict(boxstyle='round', facecolor='wheat', alpha=0.5)
+        ax.text(0.98, 0.98, textstr, transform=ax.transAxes, fontsize=9,
+                verticalalignment='top', horizontalalignment='right', bbox=props)
+        
+        return fig
+    
+    def plot_frequency_band_comparison(self,
+                                       groups: Optional[List[str]] = None,
+                                       save_path: Optional[str] = None) -> plt.Figure:
+        """
+        Compare graph frequency band energy across groups.
+        
+        Useful for AD analysis: AD often shows reduced low-frequency (global)
+        energy with preserved/increased high-frequency (local) energy.
+        """
+        if groups is None:
+            groups = list(self.graph_frequency_metrics.keys())
+        
+        fig, axes = plt.subplots(1, 2, figsize=(14, 5))
+        
+        # Left plot: Bar chart of frequency band energies
+        x = np.arange(len(groups))
+        width = 0.25
+        
+        low_energies = [self.graph_frequency_metrics[g].low_freq_energy for g in groups]
+        mid_energies = [self.graph_frequency_metrics[g].mid_freq_energy for g in groups]
+        high_energies = [self.graph_frequency_metrics[g].high_freq_energy for g in groups]
+        
+        axes[0].bar(x - width, low_energies, width, label='Low Freq (Global)', color='blue', alpha=0.7)
+        axes[0].bar(x, mid_energies, width, label='Mid Freq', color='green', alpha=0.7)
+        axes[0].bar(x + width, high_energies, width, label='High Freq (Local)', color='red', alpha=0.7)
+        
+        axes[0].set_xlabel('Group')
+        axes[0].set_ylabel('Frequency Band Energy')
+        axes[0].set_title('Graph Frequency Band Energy by Group')
+        axes[0].set_xticks(x)
+        axes[0].set_xticklabels(groups)
+        axes[0].legend()
+        axes[0].grid(True, alpha=0.3)
+        
+        # Right plot: Low/High ratio (key AD metric)
+        ratios = [self.graph_frequency_metrics[g].low_high_ratio for g in groups]
+        colors = ['red' if 'AD' in g.upper() else 'blue' for g in groups]
+        
+        axes[1].bar(x, ratios, color=colors, alpha=0.7, edgecolor='black')
+        axes[1].set_xlabel('Group')
+        axes[1].set_ylabel('Low/High Frequency Ratio')
+        axes[1].set_title('Low/High Frequency Ratio\n(AD typically shows lower ratio)')
+        axes[1].set_xticks(x)
+        axes[1].set_xticklabels(groups)
+        axes[1].axhline(1.0, color='gray', linestyle='--', alpha=0.5, label='Equal balance')
+        axes[1].legend()
+        axes[1].grid(True, alpha=0.3)
+        
+        plt.tight_layout()
+        
+        if save_path:
+            plt.savefig(save_path, dpi=300, bbox_inches='tight')
+        
+        return fig
+    
     def plot_centrality_comparison(self,
                                   groups: Optional[List[str]] = None,
                                   save_path: Optional[str] = None) -> plt.Figure:
@@ -1629,9 +1951,10 @@ class ConsensusResultsAnalyzer:
                 ""
             ])
         
-        # Get sparsity and AD metrics if available
+        # Get sparsity, AD, and graph frequency metrics if available
         sp = self.sparsity_metrics.get(group_name, SparsityMetrics())
         ad = self.ad_metrics.get(group_name, ADConnectivityMetrics())
+        gf = self.graph_frequency_metrics.get(group_name, GraphFrequencyMetrics())
         
         # Add sparsity section (CRITICAL FOR AD RESEARCH)
         lines.extend([
@@ -1701,6 +2024,50 @@ class ConsensusResultsAnalyzer:
             "",
             "### Rich-Club Organization",
             f"- Rich-club coefficient: {ad.rich_club_coefficient:.4f}",
+            ""
+        ])
+        
+        # Add Graph Frequency Spectrum section (CRITICAL for GP-VAR)
+        lines.extend([
+            "## Graph Frequency Spectrum (Critical for GP-VAR Analysis)",
+            "",
+            "### Why Graph Frequencies Matter",
+            "",
+            "The consensus Laplacian's eigenvalues define the **graph frequency spectrum**:",
+            "- Eigenvalues λ₀ ≤ λ₁ ≤ ... ≤ λₙ₋₁ are the graph frequencies",
+            "- **Low frequencies** (small λ) = smooth, global signals across connected nodes",
+            "- **High frequencies** (large λ) = rapid, local variation between neighbors",
+            "- GP-VAR uses this spectrum for graph-based temporal filtering",
+            "",
+            "### Spectral Landmarks",
+            f"- Number of eigenvalues: {gf.n_eigenvalues}",
+            f"- λ_min: {gf.lambda_min:.6f} (should be ~0 for connected graph)",
+            f"- **λ₂ (Algebraic connectivity): {gf.lambda_2:.6f}** (key for network integration)",
+            f"- λ_median: {gf.lambda_median:.4f}",
+            f"- λ_mean: {gf.lambda_mean:.4f}",
+            f"- λ_max (Spectral radius): {gf.lambda_max:.4f}",
+            "",
+            "### Spectral Distribution",
+            f"- Spectral gap (λ₂ - λ₁): {gf.spectral_gap:.6f}",
+            f"- Spectral range: {gf.spectral_range:.4f}",
+            f"- Spectral variance: {gf.spectral_variance:.4f}",
+            f"- Near-zero eigenvalues: {gf.n_zero_eigenvalues} (= number of components)",
+            "",
+            "### Graph Frequency Band Analysis",
+            f"- Low-frequency energy (bottom 25%): {gf.low_freq_energy:.4f}",
+            f"- Mid-frequency energy (middle 50%): {gf.mid_freq_energy:.4f}",
+            f"- High-frequency energy (top 25%): {gf.high_freq_energy:.4f}",
+            f"- **Low/High ratio: {gf.low_high_ratio:.4f}** (AD shows altered ratio)",
+            "",
+            "### GP-VAR Filter Properties",
+            f"- Effective bandwidth (90% energy): {gf.effective_bandwidth:.4f}",
+            f"- Spectral entropy: {gf.spectral_entropy:.4f} (uniformity of spectrum)",
+            "",
+            "### Interpretation for AD",
+            "- Lower algebraic connectivity (λ₂) indicates weaker global integration",
+            "- AD typically shows reduced low-frequency energy (disrupted global processing)",
+            "- Preserved high-frequency energy may reflect compensatory local processing",
+            "- Natural sparsity preserves the true spectrum - DO NOT use artificial thresholds!",
             ""
         ])
         
@@ -1921,6 +2288,35 @@ class ConsensusResultsAnalyzer:
             df.to_csv(filepath, index=False)
             saved_files['ad_metrics'] = str(filepath)
         
+        # Graph frequency spectrum metrics (CRITICAL for GP-VAR)
+        if self.graph_frequency_metrics:
+            rows = []
+            for group_name, metrics in self.graph_frequency_metrics.items():
+                rows.append({
+                    'group': group_name,
+                    'n_eigenvalues': metrics.n_eigenvalues,
+                    'lambda_min': metrics.lambda_min,
+                    'lambda_2_algebraic_connectivity': metrics.lambda_2,
+                    'lambda_median': metrics.lambda_median,
+                    'lambda_mean': metrics.lambda_mean,
+                    'lambda_max_spectral_radius': metrics.lambda_max,
+                    'spectral_gap': metrics.spectral_gap,
+                    'spectral_range': metrics.spectral_range,
+                    'spectral_variance': metrics.spectral_variance,
+                    'n_zero_eigenvalues': metrics.n_zero_eigenvalues,
+                    'low_freq_energy': metrics.low_freq_energy,
+                    'mid_freq_energy': metrics.mid_freq_energy,
+                    'high_freq_energy': metrics.high_freq_energy,
+                    'low_high_ratio': metrics.low_high_ratio,
+                    'effective_bandwidth': metrics.effective_bandwidth,
+                    'spectral_entropy': metrics.spectral_entropy
+                })
+            
+            df = pd.DataFrame(rows)
+            filepath = output_path / f"{prefix}_graph_frequency_metrics.csv"
+            df.to_csv(filepath, index=False)
+            saved_files['graph_frequency_metrics'] = str(filepath)
+        
         logger.info(f"Exported {len(saved_files)} CSV files to {output_dir}")
         return saved_files
     
@@ -1939,24 +2335,34 @@ class ConsensusResultsAnalyzer:
         rows = []
         for group_name, gm in self.graph_metrics.items():
             sm = self.spectral_metrics.get(group_name, SpectralMetrics())
+            sp = self.sparsity_metrics.get(group_name, SparsityMetrics())
+            gf = self.graph_frequency_metrics.get(group_name, GraphFrequencyMetrics())
+            ad = self.ad_metrics.get(group_name, ADConnectivityMetrics())
             
             rows.append({
                 'group': group_name,
                 'n_nodes': gm.n_nodes,
                 'n_edges': gm.n_edges,
-                'density': gm.density,
+                # SPARSITY (critical for AD)
+                'sparsity_percent': sp.sparsity_percent,
+                'long_range_density': sp.long_range_density,
+                # Graph metrics
                 'degree_mean': gm.degree_mean,
-                'degree_std': gm.degree_std,
                 'strength_mean': gm.strength_mean,
                 'n_components': gm.n_components,
                 'global_efficiency': gm.global_efficiency,
-                'local_efficiency': gm.local_efficiency,
                 'clustering': gm.clustering_coefficient,
                 'modularity': gm.modularity,
-                'n_communities': gm.n_communities,
                 'small_world_sigma': gm.small_world_sigma,
-                'algebraic_connectivity': sm.algebraic_connectivity,
-                'spectral_radius': sm.spectral_radius
+                # Graph frequency (for GP-VAR)
+                'lambda_2_algebraic_connectivity': gf.lambda_2,
+                'spectral_radius': gf.lambda_max,
+                'low_high_freq_ratio': gf.low_high_ratio,
+                'spectral_entropy': gf.spectral_entropy,
+                # AD-specific
+                'connectivity_loss_index': ad.connectivity_loss_index,
+                'hub_strength_ratio': ad.hub_strength_ratio,
+                'robustness_targeted': ad.robustness_targeted
             })
         
         return pd.DataFrame(rows)
@@ -2040,6 +2446,22 @@ def analyze_consensus_results(results_dir: str,
                 groups,
                 save_path=str(output_path / "centrality_comparison.png")
             )
+        
+        # Graph frequency spectrum (CRITICAL for GP-VAR)
+        for group in groups:
+            if group in analyzer.graph_frequency_metrics:
+                analyzer.plot_graph_frequency_spectrum(group)
+                plt.savefig(output_path / f"{group}_graph_frequency_spectrum.png", 
+                           dpi=300, bbox_inches='tight')
+                plt.close()
+        
+        # Graph frequency band comparison (AD vs HC)
+        if len(groups) > 1 and analyzer.graph_frequency_metrics:
+            analyzer.plot_frequency_band_comparison(
+                groups,
+                save_path=str(output_path / "graph_frequency_band_comparison.png")
+            )
+            plt.close()
     
     # Generate reports
     if generate_reports:
