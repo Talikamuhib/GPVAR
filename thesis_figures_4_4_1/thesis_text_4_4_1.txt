@@ -1,0 +1,66 @@
+
+================================================================================
+SECTION 4.4.1: LTI GP-VAR Model Selection (P, K) and Fit
+================================================================================
+
+METHODS TEXT:
+-------------
+We performed model selection over P ∈ {1, 2, 3, 5, 7, 10, 15, 20, 30} and 
+K ∈ {1, 2, 3, 4} using the Bayesian Information Criterion (BIC) 
+with stability constraints (spectral radius ρ < 1). The optimal model order (P, K) 
+was selected independently for each subject to minimize BIC while ensuring 
+model stability.
+
+RESULTS TEXT - Model Selection:
+-------------------------------
+Model selection revealed similar autoregressive orders across groups. For the 
+AD group (n=35), the median selected P was 5 
+(IQR: [5, 7]), while for the HC group 
+(n=31), the median P was 7 
+(IQR: [5, 8]). 
+This difference was not statistically significant 
+(t = -0.446, p = 0.6574, 
+Cohen's d = -0.110).
+
+For the graph filter order K, the AD group showed a median of 2 
+(IQR: [2, 3]), compared to 
+3 (IQR: [2, 3]) 
+for the HC group (t = -0.814, 
+p = 0.4192).
+
+RESULTS TEXT - Model Fit:
+-------------------------
+The LTI GP-VAR models achieved good predictive accuracy across both groups. 
+The coefficient of determination (R²) for the AD group was 0.503 
+(median; IQR: [0.466, 0.573]), compared to 
+0.531 (median; IQR: [0.497, 0.574]) 
+for the HC group. No significant difference in R² was observed between groups 
+(t = -0.894, p = 0.3746, 
+Cohen's d = -0.219).
+
+Mean squared error (MSE) was 0.454 
+(median; IQR: [0.436, 0.503]) for AD and 
+0.454 (median; IQR: [0.427, 0.477]) 
+for HC (t = 1.023, p = 0.3100).
+
+INTERPRETATION:
+---------------
+The similar model orders selected for both groups suggest comparable temporal dynamics complexity in AD and HC.
+The comparable R² values indicate that the GP-VAR framework captures EEG dynamics equally well in both clinical populations, supporting its utility for group comparisons.
+
+FIGURE CAPTIONS:
+----------------
+Figure 4.4.1a: Distribution of selected model orders (P, K) across subjects. 
+(A) Bar plot showing the frequency of each selected P value by group. 
+(B) Bar plot showing the frequency of each selected K value by group. 
+(C) Scatter plot of P vs K selection with group medians marked. 
+(D-E) Box plots comparing P and K distributions between AD and HC groups. 
+(F) Summary statistics table.
+
+Figure 4.4.1b: LTI GP-VAR model fit metrics. 
+(A) Violin plot with jittered individual data points showing R² distribution 
+for AD vs HC groups. Diamond markers indicate group means. 
+(C) Corresponding violin plot for MSE. 
+(B, D) Summary statistics for each metric.
+
+================================================================================
