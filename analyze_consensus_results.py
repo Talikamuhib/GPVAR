@@ -6,9 +6,74 @@ including:
 - Graph-theoretic metrics (centrality, modularity, efficiency)
 - Spectral analysis of the Laplacian
 - Group comparisons with statistical tests
+- Sparsity analysis (critical for AD research)
 - Regional (brain lobe) analysis
 - Publication-quality visualizations
 - Thesis-ready reports
+
+================================================================================
+WHY SPARSITY MATTERS FOR ALZHEIMER'S DISEASE (AD) EEG ANALYSIS
+================================================================================
+
+Sparse connectivity matrices are crucial for AD research for several reasons:
+
+1. DISCONNECTION SYNDROME HYPOTHESIS
+   - AD is fundamentally a "disconnection syndrome" characterized by progressive
+     loss of synaptic connections and white matter integrity
+   - Sparse networks directly model this pathophysiology by retaining only the
+     most robust, reproducible connections
+   - Dense networks would obscure the disconnection pattern central to AD
+
+2. NOISE REDUCTION & VOLUME CONDUCTION
+   - EEG signals suffer from volume conduction artifacts that create spurious
+     correlations between nearby electrodes
+   - Proportional thresholding (keeping top κ% of edges) removes weak/noisy
+     connections that likely reflect artifacts rather than true neural coupling
+   - This is especially important when comparing AD (with reduced signal power)
+     to healthy controls
+
+3. IDENTIFYING PATHOLOGICAL CHANGES
+   - AD patients show specific patterns of network disruption:
+     * Reduced long-range connectivity (especially frontoparietal)
+     * Preserved or increased local clustering (compensatory mechanism)
+     * Hub vulnerability (highly connected regions fail first)
+   - Sparse networks make these patterns statistically detectable
+   - Dense networks dilute group differences with noise
+
+4. GRAPH-THEORETICAL VALIDITY
+   - Many graph metrics (small-worldness, modularity, efficiency) are only
+     meaningful on sparse networks
+   - Dense networks trivially approach complete graphs where all nodes connect
+   - Standard practice: 10-30% edge density for brain network analysis
+
+5. COMPUTATIONAL TRACTABILITY
+   - GP-VAR and other graph-signal processing methods scale with edge count
+   - Sparse Laplacians enable efficient spectral decomposition
+   - Clinical translation requires computationally feasible methods
+
+6. REPRODUCIBILITY & RELIABILITY
+   - Consensus approach: only edges present in multiple subjects survive
+   - This naturally produces sparse networks representing consistent connectivity
+   - Edges in the final graph are statistically reliable across the cohort
+
+7. CLINICAL INTERPRETABILITY
+   - Sparse networks can be visualized and interpreted by clinicians
+   - Dense "hairball" networks provide no actionable insights
+   - Sparse hubs and modules map to known anatomical/functional systems
+
+RECOMMENDED SPARSITY LEVELS FOR AD RESEARCH:
+- Individual subject binarization: 10-20% (sparsity_binarize=0.15)
+- Final consensus graph: 5-15% (sparsity_final=0.10)
+- These values balance sensitivity to detect AD-related changes with
+  specificity to exclude noise
+
+REFERENCES:
+- Delbeuck et al. (2003) "Alzheimer's disease as a disconnection syndrome"
+- Stam (2014) "Modern network science of neurological disorders"
+- Fornito et al. (2015) "The connectomics of brain disorders"
+- Tijms et al. (2013) "AD as a network disorder"
+
+================================================================================
 
 Usage:
     python analyze_consensus_results.py --results_dir ./consensus_results
@@ -122,6 +187,97 @@ class SpectralMetrics:
     fiedler_vector: np.ndarray = field(default_factory=lambda: np.array([]))
 
 
+@dataclass
+class SparsityMetrics:
+    """
+    Container for sparsity-related metrics.
+    
+    These metrics are particularly important for AD research because:
+    - AD is a disconnection syndrome - sparsity captures the degree of disconnection
+    - Comparing sparsity between AD and HC reveals pathological connectivity loss
+    - Edge consistency measures show which connections are reliably present/absent
+    """
+    # Basic sparsity measures
+    n_possible_edges: int = 0
+    n_actual_edges: int = 0
+    edge_density: float = 0.0  # n_actual / n_possible (0 to 1)
+    sparsity_percent: float = 0.0  # edge_density * 100
+    
+    # Consensus-based sparsity (across subjects)
+    edges_full_consensus: int = 0  # C = 1.0 (present in ALL subjects)
+    edges_majority_consensus: int = 0  # C > 0.5 (present in >50% subjects)
+    edges_any_consensus: int = 0  # C > 0 (present in at least one subject)
+    edges_zero_consensus: int = 0  # C = 0 (never present)
+    
+    # Consistency measures
+    mean_consensus: float = 0.0  # Average C value for all possible edges
+    mean_consensus_positive: float = 0.0  # Average C for edges with C > 0
+    consensus_variance: float = 0.0  # Variance in consensus values
+    
+    # Distance-dependent sparsity (important for AD - long-range disconnection)
+    short_range_density: float = 0.0  # Density for nearby electrodes
+    medium_range_density: float = 0.0  # Density for medium-distance electrodes  
+    long_range_density: float = 0.0  # Density for far electrodes
+    
+    # Weight distribution in sparse network
+    mean_edge_weight: float = 0.0
+    median_edge_weight: float = 0.0
+    weight_std: float = 0.0
+    weight_cv: float = 0.0  # Coefficient of variation
+    
+    # Hub-related sparsity (AD shows hub vulnerability)
+    hub_edge_fraction: float = 0.0  # Fraction of edges connected to hubs
+    peripheral_edge_fraction: float = 0.0  # Fraction of edges between low-degree nodes
+    
+    # Thresholding summary
+    threshold_used: float = 0.0  # Weight threshold that achieves this sparsity
+    edges_above_threshold: int = 0
+
+
+@dataclass  
+class ADConnectivityMetrics:
+    """
+    Metrics specifically relevant to Alzheimer's Disease connectivity analysis.
+    
+    These capture the pathophysiological signatures of AD:
+    - Disconnection (reduced connectivity)
+    - Hub vulnerability (loss of high-degree nodes)
+    - Altered integration/segregation balance
+    - Slowing of neural dynamics (reflected in spectral changes)
+    """
+    # Disconnection measures
+    global_connectivity_strength: float = 0.0  # Sum of all edge weights
+    mean_connection_strength: float = 0.0  # Average edge weight
+    connectivity_loss_index: float = 0.0  # Compared to theoretical maximum
+    
+    # Hub vulnerability (AD preferentially affects hubs)
+    hub_strength_ratio: float = 0.0  # Hub strength / peripheral strength
+    hub_degree_ratio: float = 0.0  # Hub degree / peripheral degree
+    n_hubs: int = 0  # Number of hub nodes (degree > mean + 1 SD)
+    hub_node_indices: np.ndarray = field(default_factory=lambda: np.array([]))
+    
+    # Integration vs Segregation (AD alters this balance)
+    integration_index: float = 0.0  # Global efficiency
+    segregation_index: float = 0.0  # Modularity * clustering
+    integration_segregation_ratio: float = 0.0
+    
+    # Long-range connectivity (specifically affected in AD)
+    long_range_strength: float = 0.0
+    short_range_strength: float = 0.0
+    long_short_ratio: float = 0.0  # AD typically shows reduced ratio
+    
+    # Frontoparietal connectivity (key AD-affected network)
+    frontoparietal_strength: float = 0.0  # If electrode regions known
+    
+    # Network resilience (AD networks are more vulnerable)
+    robustness_random: float = 0.0  # Resilience to random node removal
+    robustness_targeted: float = 0.0  # Resilience to hub removal (lower in AD)
+    
+    # Rich-club organization (often disrupted in AD)
+    rich_club_coefficient: float = 0.0
+    normalized_rich_club: float = 0.0
+
+
 # ============================================================================
 # Core Analysis Class
 # ============================================================================
@@ -156,6 +312,8 @@ class ConsensusResultsAnalyzer:
         self.graph_metrics: Dict[str, GraphMetrics] = {}
         self.node_metrics: Dict[str, NodeMetrics] = {}
         self.spectral_metrics: Dict[str, SpectralMetrics] = {}
+        self.sparsity_metrics: Dict[str, SparsityMetrics] = {}
+        self.ad_metrics: Dict[str, ADConnectivityMetrics] = {}
         
     def load_results(self, results_dir: Optional[str] = None) -> None:
         """
@@ -341,6 +499,17 @@ class ConsensusResultsAnalyzer:
             self.graph_metrics[group_name] = self._compute_graph_metrics(G_matrix, G_nx)
             self.node_metrics[group_name] = self._compute_node_metrics(G_matrix, G_nx)
             self.spectral_metrics[group_name] = self._compute_spectral_metrics(G_matrix)
+            
+            # Compute sparsity metrics (critical for AD analysis)
+            C_matrix = self.consensus_matrices.get(group_name)
+            self.sparsity_metrics[group_name] = self._compute_sparsity_metrics(
+                G_matrix, C_matrix, self.channel_locations
+            )
+            
+            # Compute AD-specific metrics
+            self.ad_metrics[group_name] = self._compute_ad_metrics(
+                G_matrix, G_nx, self.channel_locations
+            )
         
         logger.info("Metric computation complete")
     
@@ -545,6 +714,321 @@ class ConsensusResultsAnalyzer:
         metrics.near_zero_modes = int(np.sum(eigenvalues < 1e-5))
         
         return metrics
+    
+    def _compute_sparsity_metrics(self,
+                                  adjacency: np.ndarray,
+                                  consensus: Optional[np.ndarray] = None,
+                                  channel_locations: Optional[np.ndarray] = None) -> SparsityMetrics:
+        """
+        Compute comprehensive sparsity metrics.
+        
+        CLINICAL RELEVANCE FOR AD:
+        - Edge density directly measures network sparsity/disconnection
+        - Consensus-based metrics show reliability of connections across subjects
+        - Distance-dependent sparsity reveals long-range disconnection (AD hallmark)
+        - Hub edge fractions indicate hub vulnerability
+        
+        Parameters
+        ----------
+        adjacency : np.ndarray
+            Final graph adjacency matrix
+        consensus : np.ndarray, optional
+            Consensus matrix C (fraction of subjects with each edge)
+        channel_locations : np.ndarray, optional
+            3D electrode coordinates for distance calculations
+            
+        Returns
+        -------
+        SparsityMetrics
+            Comprehensive sparsity analysis
+        """
+        metrics = SparsityMetrics()
+        n_nodes = adjacency.shape[0]
+        triu_idx = np.triu_indices(n_nodes, k=1)
+        
+        # Basic sparsity measures
+        metrics.n_possible_edges = len(triu_idx[0])
+        edge_weights = adjacency[triu_idx]
+        edge_mask = edge_weights > 0
+        metrics.n_actual_edges = int(np.sum(edge_mask))
+        metrics.edge_density = metrics.n_actual_edges / max(1, metrics.n_possible_edges)
+        metrics.sparsity_percent = metrics.edge_density * 100
+        
+        # Weight distribution for existing edges
+        positive_weights = edge_weights[edge_mask]
+        if positive_weights.size > 0:
+            metrics.mean_edge_weight = float(np.mean(positive_weights))
+            metrics.median_edge_weight = float(np.median(positive_weights))
+            metrics.weight_std = float(np.std(positive_weights))
+            metrics.weight_cv = metrics.weight_std / metrics.mean_edge_weight if metrics.mean_edge_weight > 0 else 0
+        
+        # Find threshold that achieves this sparsity
+        if positive_weights.size > 0:
+            metrics.threshold_used = float(np.min(positive_weights))
+            metrics.edges_above_threshold = int(np.sum(edge_weights >= metrics.threshold_used))
+        
+        # Consensus-based sparsity (if consensus matrix available)
+        if consensus is not None:
+            consensus_values = consensus[triu_idx]
+            metrics.edges_full_consensus = int(np.sum(consensus_values >= 0.999))
+            metrics.edges_majority_consensus = int(np.sum(consensus_values > 0.5))
+            metrics.edges_any_consensus = int(np.sum(consensus_values > 0))
+            metrics.edges_zero_consensus = int(np.sum(consensus_values == 0))
+            
+            metrics.mean_consensus = float(np.mean(consensus_values))
+            positive_consensus = consensus_values[consensus_values > 0]
+            if positive_consensus.size > 0:
+                metrics.mean_consensus_positive = float(np.mean(positive_consensus))
+            metrics.consensus_variance = float(np.var(consensus_values))
+        
+        # Distance-dependent sparsity (critical for AD - shows long-range disconnection)
+        if channel_locations is not None and channel_locations.shape[0] == n_nodes:
+            distances = squareform(pdist(channel_locations))
+            edge_distances = distances[triu_idx]
+            
+            # Define distance bins (thirds of distance range)
+            d_min, d_max = edge_distances.min(), edge_distances.max()
+            d_range = d_max - d_min
+            d_short = d_min + d_range / 3
+            d_medium = d_min + 2 * d_range / 3
+            
+            # Short-range: nearby electrodes
+            short_mask = edge_distances <= d_short
+            n_short = np.sum(short_mask)
+            short_edges = np.sum(edge_mask & short_mask)
+            metrics.short_range_density = short_edges / max(1, n_short)
+            
+            # Medium-range
+            medium_mask = (edge_distances > d_short) & (edge_distances <= d_medium)
+            n_medium = np.sum(medium_mask)
+            medium_edges = np.sum(edge_mask & medium_mask)
+            metrics.medium_range_density = medium_edges / max(1, n_medium)
+            
+            # Long-range: distant electrodes (often reduced in AD)
+            long_mask = edge_distances > d_medium
+            n_long = np.sum(long_mask)
+            long_edges = np.sum(edge_mask & long_mask)
+            metrics.long_range_density = long_edges / max(1, n_long)
+        
+        # Hub-related sparsity (AD shows hub vulnerability)
+        degrees = np.sum(adjacency > 0, axis=0)
+        if degrees.size > 0:
+            degree_threshold = np.mean(degrees) + np.std(degrees)
+            hub_nodes = degrees >= degree_threshold
+            peripheral_nodes = ~hub_nodes
+            
+            # Count edges involving hubs vs peripheral nodes
+            n_hub_edges = 0
+            n_peripheral_edges = 0
+            
+            for i, j in zip(triu_idx[0][edge_mask], triu_idx[1][edge_mask]):
+                if hub_nodes[i] or hub_nodes[j]:
+                    n_hub_edges += 1
+                if peripheral_nodes[i] and peripheral_nodes[j]:
+                    n_peripheral_edges += 1
+            
+            total_edges = max(1, metrics.n_actual_edges)
+            metrics.hub_edge_fraction = n_hub_edges / total_edges
+            metrics.peripheral_edge_fraction = n_peripheral_edges / total_edges
+        
+        return metrics
+    
+    def _compute_ad_metrics(self,
+                           adjacency: np.ndarray,
+                           G: nx.Graph,
+                           channel_locations: Optional[np.ndarray] = None) -> ADConnectivityMetrics:
+        """
+        Compute AD-specific connectivity metrics.
+        
+        These metrics capture pathophysiological signatures of Alzheimer's Disease:
+        - Disconnection syndrome (global connectivity reduction)
+        - Hub vulnerability (hubs fail before peripheral nodes)
+        - Altered integration/segregation balance
+        - Long-range disconnection (especially frontoparietal)
+        
+        Parameters
+        ----------
+        adjacency : np.ndarray
+            Final graph adjacency matrix
+        G : nx.Graph
+            NetworkX graph representation
+        channel_locations : np.ndarray, optional
+            3D electrode coordinates
+            
+        Returns
+        -------
+        ADConnectivityMetrics
+            AD-relevant network measures
+        """
+        metrics = ADConnectivityMetrics()
+        n_nodes = adjacency.shape[0]
+        triu_idx = np.triu_indices(n_nodes, k=1)
+        
+        # === DISCONNECTION MEASURES ===
+        # Total connectivity strength (AD shows global reduction)
+        edge_weights = adjacency[triu_idx]
+        metrics.global_connectivity_strength = float(np.sum(edge_weights))
+        
+        # Mean connection strength (per existing edge)
+        positive_weights = edge_weights[edge_weights > 0]
+        if positive_weights.size > 0:
+            metrics.mean_connection_strength = float(np.mean(positive_weights))
+        
+        # Connectivity loss index (compared to fully connected network)
+        # Higher values = more disconnection (worse in AD)
+        max_possible_strength = len(triu_idx[0])  # If all edges had weight 1
+        metrics.connectivity_loss_index = 1 - (metrics.global_connectivity_strength / max_possible_strength)
+        
+        # === HUB VULNERABILITY ===
+        # AD preferentially affects highly connected hub regions
+        degrees = np.array([G.degree(i) for i in range(n_nodes)])
+        strengths = np.sum(adjacency, axis=1)
+        
+        if degrees.size > 0 and np.std(degrees) > 0:
+            # Define hubs as nodes with degree > mean + 1 SD
+            degree_threshold = np.mean(degrees) + np.std(degrees)
+            hub_mask = degrees >= degree_threshold
+            metrics.n_hubs = int(np.sum(hub_mask))
+            metrics.hub_node_indices = np.where(hub_mask)[0]
+            
+            if metrics.n_hubs > 0 and np.sum(~hub_mask) > 0:
+                hub_strength = np.mean(strengths[hub_mask])
+                peripheral_strength = np.mean(strengths[~hub_mask])
+                hub_degree = np.mean(degrees[hub_mask])
+                peripheral_degree = np.mean(degrees[~hub_mask])
+                
+                metrics.hub_strength_ratio = hub_strength / max(peripheral_strength, 1e-10)
+                metrics.hub_degree_ratio = hub_degree / max(peripheral_degree, 1e-10)
+        
+        # === INTEGRATION VS SEGREGATION ===
+        # AD disrupts the balance between integration (global efficiency)
+        # and segregation (clustering/modularity)
+        try:
+            metrics.integration_index = nx.global_efficiency(G)
+        except:
+            metrics.integration_index = 0.0
+        
+        try:
+            clustering = nx.average_clustering(G, weight='weight')
+            communities = nx.community.louvain_communities(G, weight='weight', seed=42)
+            modularity = nx.community.modularity(G, communities, weight='weight')
+            metrics.segregation_index = clustering * modularity
+        except:
+            metrics.segregation_index = 0.0
+        
+        if metrics.segregation_index > 0:
+            metrics.integration_segregation_ratio = metrics.integration_index / metrics.segregation_index
+        
+        # === LONG-RANGE CONNECTIVITY ===
+        # AD specifically affects long-range (especially frontoparietal) connections
+        if channel_locations is not None and channel_locations.shape[0] == n_nodes:
+            distances = squareform(pdist(channel_locations))
+            edge_distances = distances[triu_idx]
+            
+            # Median split for short vs long range
+            median_distance = np.median(edge_distances)
+            
+            for idx, (i, j) in enumerate(zip(triu_idx[0], triu_idx[1])):
+                weight = adjacency[i, j]
+                if weight > 0:
+                    if edge_distances[idx] > median_distance:
+                        metrics.long_range_strength += weight
+                    else:
+                        metrics.short_range_strength += weight
+            
+            if metrics.short_range_strength > 0:
+                metrics.long_short_ratio = metrics.long_range_strength / metrics.short_range_strength
+        
+        # === NETWORK RESILIENCE ===
+        # AD networks are less resilient to perturbation
+        if G.number_of_edges() > 0 and G.number_of_nodes() > 5:
+            # Robustness to random node removal
+            try:
+                metrics.robustness_random = self._compute_robustness(G, targeted=False)
+            except:
+                metrics.robustness_random = float('nan')
+            
+            # Robustness to targeted (hub) removal - typically lower in AD
+            try:
+                metrics.robustness_targeted = self._compute_robustness(G, targeted=True)
+            except:
+                metrics.robustness_targeted = float('nan')
+        
+        # === RICH-CLUB ORGANIZATION ===
+        # AD often shows disrupted rich-club (hub-to-hub connections)
+        if G.number_of_edges() > 0:
+            try:
+                rc = nx.rich_club_coefficient(G, normalized=False)
+                if rc:
+                    # Use coefficient at median degree
+                    k_values = sorted(rc.keys())
+                    if k_values:
+                        k_median = k_values[len(k_values)//2]
+                        metrics.rich_club_coefficient = rc.get(k_median, 0.0)
+            except:
+                metrics.rich_club_coefficient = float('nan')
+        
+        return metrics
+    
+    def _compute_robustness(self, G: nx.Graph, targeted: bool = False, 
+                           n_iterations: int = 5) -> float:
+        """
+        Compute network robustness to node removal.
+        
+        Parameters
+        ----------
+        G : nx.Graph
+            Network graph
+        targeted : bool
+            If True, remove highest-degree nodes first (hub attack)
+            If False, remove random nodes
+        n_iterations : int
+            Number of iterations for random removal
+            
+        Returns
+        -------
+        float
+            Robustness score (area under largest component curve)
+        """
+        n_nodes = G.number_of_nodes()
+        if n_nodes < 3:
+            return 0.0
+        
+        robustness_scores = []
+        
+        for _ in range(n_iterations if not targeted else 1):
+            G_copy = G.copy()
+            nodes = list(G_copy.nodes())
+            lcc_sizes = [1.0]  # Initial: 100% in largest component
+            
+            # Remove nodes one by one
+            n_to_remove = max(1, n_nodes // 2)  # Remove up to 50% of nodes
+            
+            for _ in range(n_to_remove):
+                if G_copy.number_of_nodes() == 0:
+                    break
+                
+                if targeted:
+                    # Remove highest-degree node
+                    degrees = dict(G_copy.degree())
+                    node_to_remove = max(degrees, key=degrees.get)
+                else:
+                    # Remove random node
+                    node_to_remove = np.random.choice(list(G_copy.nodes()))
+                
+                G_copy.remove_node(node_to_remove)
+                
+                if G_copy.number_of_nodes() > 0:
+                    components = list(nx.connected_components(G_copy))
+                    largest_cc = max(len(c) for c in components) if components else 0
+                    lcc_sizes.append(largest_cc / n_nodes)
+                else:
+                    lcc_sizes.append(0.0)
+            
+            # Area under curve (higher = more robust)
+            robustness_scores.append(np.trapz(lcc_sizes) / len(lcc_sizes))
+        
+        return float(np.mean(robustness_scores))
     
     # ========================================================================
     # Group Comparisons
@@ -1145,6 +1629,81 @@ class ConsensusResultsAnalyzer:
                 ""
             ])
         
+        # Get sparsity and AD metrics if available
+        sp = self.sparsity_metrics.get(group_name, SparsityMetrics())
+        ad = self.ad_metrics.get(group_name, ADConnectivityMetrics())
+        
+        # Add sparsity section (CRITICAL FOR AD RESEARCH)
+        lines.extend([
+            "## Sparsity Analysis (Critical for AD Research)",
+            "",
+            "### Why Sparsity Matters for Alzheimer's Disease",
+            "",
+            "Sparse connectivity matrices are essential for AD research because:",
+            "1. **Disconnection Hypothesis**: AD is fundamentally a disconnection syndrome",
+            "2. **Noise Reduction**: Removes spurious correlations from volume conduction",
+            "3. **Hub Vulnerability**: Sparse networks reveal hub disruption patterns",
+            "4. **Clinical Interpretability**: Sparse networks can be visualized and interpreted",
+            "",
+            "### Sparsity Metrics",
+            f"- Possible edges: {sp.n_possible_edges}",
+            f"- Actual edges retained: {sp.n_actual_edges}",
+            f"- **Edge density: {sp.sparsity_percent:.2f}%** (target: 5-15% for AD analysis)",
+            f"- Mean edge weight: {sp.mean_edge_weight:.4f}",
+            f"- Median edge weight: {sp.median_edge_weight:.4f}",
+            f"- Weight coefficient of variation: {sp.weight_cv:.4f}",
+            "",
+            "### Consensus-Based Edge Reliability",
+            f"- Edges with full consensus (C=1): {sp.edges_full_consensus} (present in ALL subjects)",
+            f"- Edges with majority consensus (C>0.5): {sp.edges_majority_consensus}",
+            f"- Edges with any presence (C>0): {sp.edges_any_consensus}",
+            f"- Never-present edges (C=0): {sp.edges_zero_consensus}",
+            f"- Mean consensus for positive edges: {sp.mean_consensus_positive:.4f}",
+            "",
+            "### Distance-Dependent Sparsity (AD shows long-range disconnection)",
+            f"- Short-range edge density: {sp.short_range_density:.4f}",
+            f"- Medium-range edge density: {sp.medium_range_density:.4f}",
+            f"- **Long-range edge density: {sp.long_range_density:.4f}** (reduced in AD)",
+            "",
+            "### Hub-Related Sparsity (AD shows hub vulnerability)",
+            f"- Fraction of edges connected to hubs: {sp.hub_edge_fraction:.4f}",
+            f"- Fraction of peripheral-only edges: {sp.peripheral_edge_fraction:.4f}",
+            ""
+        ])
+        
+        # Add AD-specific metrics section
+        lines.extend([
+            "## Alzheimer's Disease Connectivity Metrics",
+            "",
+            "### Disconnection Measures",
+            f"- Global connectivity strength: {ad.global_connectivity_strength:.4f}",
+            f"- Mean connection strength: {ad.mean_connection_strength:.4f}",
+            f"- **Connectivity loss index: {ad.connectivity_loss_index:.4f}** (higher = more disconnection)",
+            "",
+            "### Hub Vulnerability (AD preferentially affects hubs)",
+            f"- Number of hub nodes: {ad.n_hubs}",
+            f"- Hub strength ratio (hub/peripheral): {ad.hub_strength_ratio:.4f}",
+            f"- Hub degree ratio: {ad.hub_degree_ratio:.4f}",
+            "",
+            "### Integration vs Segregation Balance",
+            f"- Integration index (global efficiency): {ad.integration_index:.4f}",
+            f"- Segregation index (clustering × modularity): {ad.segregation_index:.4f}",
+            f"- **Integration/Segregation ratio: {ad.integration_segregation_ratio:.4f}**",
+            "",
+            "### Long-Range Connectivity (specifically affected in AD)",
+            f"- Long-range connection strength: {ad.long_range_strength:.4f}",
+            f"- Short-range connection strength: {ad.short_range_strength:.4f}",
+            f"- **Long/Short ratio: {ad.long_short_ratio:.4f}** (typically reduced in AD)",
+            "",
+            "### Network Resilience",
+            f"- Robustness to random attack: {ad.robustness_random:.4f}",
+            f"- **Robustness to targeted (hub) attack: {ad.robustness_targeted:.4f}** (lower in AD)",
+            "",
+            "### Rich-Club Organization",
+            f"- Rich-club coefficient: {ad.rich_club_coefficient:.4f}",
+            ""
+        ])
+        
         if include_thesis_text:
             # Generate thesis-ready prose
             connectivity_text = (
@@ -1161,8 +1720,25 @@ class ConsensusResultsAnalyzer:
                 else "with small-world properties not estimable due to sparse connectivity"
             )
             
+            # Sparsity interpretation for AD
+            sparsity_interpretation = (
+                "within the recommended range (5-15%) for detecting AD-related network changes"
+                if 5 <= sp.sparsity_percent <= 15
+                else "below the typical range, which may indicate very conservative thresholding"
+                if sp.sparsity_percent < 5
+                else "above the typical range, which may include noise-related connections"
+            )
+            
+            long_range_interpretation = (
+                "potentially indicating preserved long-range connectivity"
+                if sp.long_range_density >= sp.short_range_density * 0.7
+                else "suggesting reduced long-range connectivity consistent with disconnection patterns"
+            )
+            
             lines.extend([
                 "## Thesis-Ready Summary",
+                "",
+                "### Network Structure",
                 "",
                 f"The consensus connectivity graph for {group_name} comprises {gm.n_nodes} nodes "
                 f"and {gm.n_edges} edges, yielding an edge density of {gm.sparsity_pct:.2f}%. "
@@ -1173,17 +1749,42 @@ class ConsensusResultsAnalyzer:
                 f"Weighted node strengths range from {gm.strength_min:.3f} to {gm.strength_max:.3f} "
                 f"(median = {gm.strength_median:.3f}).",
                 "",
+                "### Efficiency and Small-World Properties",
+                "",
                 f"Global efficiency ({gm.global_efficiency:.4f}) and local efficiency ({gm.local_efficiency:.4f}) "
                 f"characterize the network's integration and segregation properties. "
                 f"The weighted clustering coefficient is {gm.clustering_coefficient:.4f}, "
                 f"and modularity analysis reveals {gm.n_communities} communities (Q = {gm.modularity:.3f}). "
                 f"The small-world sigma statistic is {gm.small_world_sigma:.3f}, {small_world_text}.",
                 "",
+                "### Spectral Properties",
+                "",
                 f"Spectral analysis of the graph Laplacian shows algebraic connectivity "
                 f"λ₂ = {sm.algebraic_connectivity:.5f}, with {sm.near_zero_modes} near-zero modes "
                 f"corresponding to the {gm.n_components} connected component(s). "
                 f"The spectral radius (λ_max = {sm.spectral_radius:.3f}) bounds the "
                 f"high-frequency content available to graph-based signal processing methods.",
+                "",
+                "### Clinical Relevance for Alzheimer's Disease",
+                "",
+                f"The network sparsity of {sp.sparsity_percent:.2f}% is {sparsity_interpretation}. "
+                f"The consensus approach retained edges present in {sp.mean_consensus_positive:.1%} of subjects on average, "
+                f"ensuring that the final graph represents robust, reproducible connectivity patterns rather than noise.",
+                "",
+                f"Distance-dependent analysis reveals short-range density of {sp.short_range_density:.4f} versus "
+                f"long-range density of {sp.long_range_density:.4f}, {long_range_interpretation}. "
+                f"This is particularly relevant as AD is characterized by preferential loss of long-range connections, "
+                f"especially in frontoparietal circuits.",
+                "",
+                f"The network contains {ad.n_hubs} hub nodes (degree > mean + 1 SD), with hub-to-peripheral "
+                f"strength ratio of {ad.hub_strength_ratio:.2f}. Hub vulnerability analysis shows robustness of "
+                f"{ad.robustness_targeted:.3f} to targeted attack, compared to {ad.robustness_random:.3f} for random attack. "
+                f"{'Lower targeted robustness suggests the network may be vulnerable to hub failure, consistent with AD pathophysiology.' if ad.robustness_targeted < ad.robustness_random else 'Similar robustness values suggest a distributed network architecture.'}",
+                "",
+                f"The integration/segregation ratio of {ad.integration_segregation_ratio:.3f} quantifies the balance "
+                f"between global information integration and local modular processing. AD typically disrupts this balance, "
+                f"showing reduced integration while potentially preserving (or even increasing) local clustering as a "
+                f"compensatory mechanism.",
                 ""
             ])
         
@@ -1263,6 +1864,62 @@ class ConsensusResultsAnalyzer:
             filepath = output_path / f"{prefix}_spectral_metrics.csv"
             df.to_csv(filepath, index=False)
             saved_files['spectral_metrics'] = str(filepath)
+        
+        # Sparsity metrics (critical for AD analysis)
+        if self.sparsity_metrics:
+            rows = []
+            for group_name, metrics in self.sparsity_metrics.items():
+                rows.append({
+                    'group': group_name,
+                    'n_possible_edges': metrics.n_possible_edges,
+                    'n_actual_edges': metrics.n_actual_edges,
+                    'edge_density': metrics.edge_density,
+                    'sparsity_percent': metrics.sparsity_percent,
+                    'edges_full_consensus': metrics.edges_full_consensus,
+                    'edges_majority_consensus': metrics.edges_majority_consensus,
+                    'mean_consensus': metrics.mean_consensus,
+                    'mean_consensus_positive': metrics.mean_consensus_positive,
+                    'short_range_density': metrics.short_range_density,
+                    'medium_range_density': metrics.medium_range_density,
+                    'long_range_density': metrics.long_range_density,
+                    'mean_edge_weight': metrics.mean_edge_weight,
+                    'weight_cv': metrics.weight_cv,
+                    'hub_edge_fraction': metrics.hub_edge_fraction,
+                    'peripheral_edge_fraction': metrics.peripheral_edge_fraction
+                })
+            
+            df = pd.DataFrame(rows)
+            filepath = output_path / f"{prefix}_sparsity_metrics.csv"
+            df.to_csv(filepath, index=False)
+            saved_files['sparsity_metrics'] = str(filepath)
+        
+        # AD-specific metrics
+        if self.ad_metrics:
+            rows = []
+            for group_name, metrics in self.ad_metrics.items():
+                rows.append({
+                    'group': group_name,
+                    'global_connectivity_strength': metrics.global_connectivity_strength,
+                    'mean_connection_strength': metrics.mean_connection_strength,
+                    'connectivity_loss_index': metrics.connectivity_loss_index,
+                    'n_hubs': metrics.n_hubs,
+                    'hub_strength_ratio': metrics.hub_strength_ratio,
+                    'hub_degree_ratio': metrics.hub_degree_ratio,
+                    'integration_index': metrics.integration_index,
+                    'segregation_index': metrics.segregation_index,
+                    'integration_segregation_ratio': metrics.integration_segregation_ratio,
+                    'long_range_strength': metrics.long_range_strength,
+                    'short_range_strength': metrics.short_range_strength,
+                    'long_short_ratio': metrics.long_short_ratio,
+                    'robustness_random': metrics.robustness_random,
+                    'robustness_targeted': metrics.robustness_targeted,
+                    'rich_club_coefficient': metrics.rich_club_coefficient
+                })
+            
+            df = pd.DataFrame(rows)
+            filepath = output_path / f"{prefix}_ad_connectivity_metrics.csv"
+            df.to_csv(filepath, index=False)
+            saved_files['ad_metrics'] = str(filepath)
         
         logger.info(f"Exported {len(saved_files)} CSV files to {output_dir}")
         return saved_files
