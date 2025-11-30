@@ -1,0 +1,11 @@
+{
+  "P": 1,
+  "K": 1,
+  "n_channels": 64,
+  "n_coefficients": 2,
+  "spectral_radius": 0.0,
+  "R2": 1.0,
+  "MSE": 0.0,
+  "BIC": -44208131.195421346,
+  "stable": true
+}
