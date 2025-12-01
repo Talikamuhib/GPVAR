@@ -1,21 +1,17 @@
 """
-Consensus Matrix Implementation for EEG Connectivity Analysis
-Using Pearson Correlation with Distance-Dependent Thresholding
+Consensus Matrix Implementation for EEG Connectivity Analysis.
 
-This implementation follows the Betzel-style consensus approach for building
-group-level brain networks from individual subject connectivity matrices.
+Build group-level brain networks from individual subject connectivity matrices
+using Fisher-z averaging. Supports both direct averaging (recommended) and 
+Betzel-style binarization-based consensus approaches.
 """
 
 import numpy as np
 import scipy.io as sio
-import scipy.stats as stats
 from scipy.spatial.distance import pdist, squareform
-from scipy.signal import hilbert
 import mne
 from mne.channels import make_standard_montage
-import pandas as pd
 from pathlib import Path
-import warnings
 import matplotlib.pyplot as plt
 import seaborn as sns
 import networkx as nx
