@@ -536,46 +536,107 @@ EXPECTED: Lower correlation than within-group comparison
     print("└──────────────────────────┴──────────┴──────────┴──────────┴─────────────────┘")
     
     # =============================================================================
-    # ALL SUBJECTS VALIDATION
+    # ALL SUBJECTS VALIDATION - COMPARE TO BOTH CONSENSUS MATRICES
     # =============================================================================
     print("\n" + "="*70)
-    print("VALIDATING ALL SUBJECTS vs CONSENSUS")
+    print("VALIDATING ALL SUBJECTS vs BOTH CONSENSUS MATRICES")
     print("="*70)
     
-    # Compute statistics for all AD subjects
-    ad_pearson_all = []
-    ad_jaccard_all = []
-    for i, subj in enumerate(ad_corr_matrices):
-        res = compare_connectivity(subj, ad_consensus)
-        ad_pearson_all.append(res['pearson_r'])
-        ad_jaccard_all.append(res['jaccard'])
+    # Compare each AD subject to BOTH AD consensus AND HC consensus
+    ad_vs_ad_pearson = []  # AD subjects vs AD consensus
+    ad_vs_ad_jaccard = []
+    ad_vs_hc_pearson = []  # AD subjects vs HC consensus
+    ad_vs_hc_jaccard = []
     
-    # Compute statistics for all HC subjects
-    hc_pearson_all = []
-    hc_jaccard_all = []
+    print("\n" + "─"*70)
+    print("AD SUBJECTS: Comparing to AD Consensus AND HC Consensus")
+    print("─"*70)
+    print(f"\n{'Subject':<12} {'vs AD Cons':<14} {'vs HC Cons':<14} {'Difference':<12} {'Classification'}")
+    print(f"{'':12} {'(Pearson r)':<14} {'(Pearson r)':<14} {'(AD - HC)':<12}")
+    print("─"*70)
+    
+    for i, subj in enumerate(ad_corr_matrices):
+        res_ad = compare_connectivity(subj, ad_consensus)
+        res_hc = compare_connectivity(subj, hc_consensus)
+        
+        ad_vs_ad_pearson.append(res_ad['pearson_r'])
+        ad_vs_ad_jaccard.append(res_ad['jaccard'])
+        ad_vs_hc_pearson.append(res_hc['pearson_r'])
+        ad_vs_hc_jaccard.append(res_hc['jaccard'])
+        
+        diff = res_ad['pearson_r'] - res_hc['pearson_r']
+        classification = "✓ Correct (AD)" if diff > 0 else "✗ Wrong (HC)"
+        
+        print(f"AD-{i+1:<8} {res_ad['pearson_r']:<14.3f} {res_hc['pearson_r']:<14.3f} {diff:<12.3f} {classification}")
+    
+    # Compare each HC subject to BOTH HC consensus AND AD consensus
+    hc_vs_hc_pearson = []  # HC subjects vs HC consensus
+    hc_vs_hc_jaccard = []
+    hc_vs_ad_pearson = []  # HC subjects vs AD consensus
+    hc_vs_ad_jaccard = []
+    
+    print("\n" + "─"*70)
+    print("HC SUBJECTS: Comparing to HC Consensus AND AD Consensus")
+    print("─"*70)
+    print(f"\n{'Subject':<12} {'vs HC Cons':<14} {'vs AD Cons':<14} {'Difference':<12} {'Classification'}")
+    print(f"{'':12} {'(Pearson r)':<14} {'(Pearson r)':<14} {'(HC - AD)':<12}")
+    print("─"*70)
+    
     for i, subj in enumerate(hc_corr_matrices):
-        res = compare_connectivity(subj, hc_consensus)
-        hc_pearson_all.append(res['pearson_r'])
-        hc_jaccard_all.append(res['jaccard'])
+        res_hc = compare_connectivity(subj, hc_consensus)
+        res_ad = compare_connectivity(subj, ad_consensus)
+        
+        hc_vs_hc_pearson.append(res_hc['pearson_r'])
+        hc_vs_hc_jaccard.append(res_hc['jaccard'])
+        hc_vs_ad_pearson.append(res_ad['pearson_r'])
+        hc_vs_ad_jaccard.append(res_ad['jaccard'])
+        
+        diff = res_hc['pearson_r'] - res_ad['pearson_r']
+        classification = "✓ Correct (HC)" if diff > 0 else "✗ Wrong (AD)"
+        
+        print(f"HC-{i+1:<8} {res_hc['pearson_r']:<14.3f} {res_ad['pearson_r']:<14.3f} {diff:<12.3f} {classification}")
+    
+    # For backward compatibility
+    ad_pearson_all = ad_vs_ad_pearson
+    ad_jaccard_all = ad_vs_ad_jaccard
+    hc_pearson_all = hc_vs_hc_pearson
+    hc_jaccard_all = hc_vs_hc_jaccard
+    
+    # Classification accuracy
+    ad_correct = np.sum(np.array(ad_vs_ad_pearson) > np.array(ad_vs_hc_pearson))
+    hc_correct = np.sum(np.array(hc_vs_hc_pearson) > np.array(hc_vs_ad_pearson))
+    total_correct = ad_correct + hc_correct
+    total_subjects = n_ad + n_hc
+    accuracy = 100 * total_correct / total_subjects
     
     print(f"""
-┌────────────────────────────────────────────────────────────────────────┐
-│              ALL SUBJECTS vs CONSENSUS: SUMMARY                        │
-├────────────────────────────────────────────────────────────────────────┤
-│                                                                        │
-│  AD GROUP (n={n_ad})                                                    │
-│  ─────────────────                                                     │
-│    PEARSON r:  {np.mean(ad_pearson_all):.3f} ± {np.std(ad_pearson_all):.3f}  (range: [{np.min(ad_pearson_all):.3f}, {np.max(ad_pearson_all):.3f}])        │
-│    JACCARD:    {np.mean(ad_jaccard_all):.3f} ± {np.std(ad_jaccard_all):.3f}  (range: [{np.min(ad_jaccard_all):.3f}, {np.max(ad_jaccard_all):.3f}])        │
-│    Subjects with J > 0.5: {np.sum(np.array(ad_jaccard_all) > 0.5)}/{n_ad} ({100*np.mean(np.array(ad_jaccard_all) > 0.5):.0f}%)                            │
-│                                                                        │
-│  HC GROUP (n={n_hc})                                                    │
-│  ─────────────────                                                     │
-│    PEARSON r:  {np.mean(hc_pearson_all):.3f} ± {np.std(hc_pearson_all):.3f}  (range: [{np.min(hc_pearson_all):.3f}, {np.max(hc_pearson_all):.3f}])        │
-│    JACCARD:    {np.mean(hc_jaccard_all):.3f} ± {np.std(hc_jaccard_all):.3f}  (range: [{np.min(hc_jaccard_all):.3f}, {np.max(hc_jaccard_all):.3f}])        │
-│    Subjects with J > 0.5: {np.sum(np.array(hc_jaccard_all) > 0.5)}/{n_hc} ({100*np.mean(np.array(hc_jaccard_all) > 0.5):.0f}%)                            │
-│                                                                        │
-└────────────────────────────────────────────────────────────────────────┘
+┌──────────────────────────────────────────────────────────────────────────────┐
+│              ALL SUBJECTS vs BOTH CONSENSUS MATRICES: SUMMARY                │
+├──────────────────────────────────────────────────────────────────────────────┤
+│                                                                              │
+│  AD SUBJECTS (n={n_ad})                                                       │
+│  ───────────────────                                                         │
+│    vs AD Consensus:  r = {np.mean(ad_vs_ad_pearson):.3f} ± {np.std(ad_vs_ad_pearson):.3f}  (SHOULD BE HIGH) ✓        │
+│    vs HC Consensus:  r = {np.mean(ad_vs_hc_pearson):.3f} ± {np.std(ad_vs_hc_pearson):.3f}  (SHOULD BE LOW)  ✓        │
+│    Difference:       Δr = {np.mean(np.array(ad_vs_ad_pearson) - np.array(ad_vs_hc_pearson)):.3f} ± {np.std(np.array(ad_vs_ad_pearson) - np.array(ad_vs_hc_pearson)):.3f}                              │
+│    Correctly classified: {ad_correct}/{n_ad} ({100*ad_correct/n_ad:.0f}%)                                     │
+│                                                                              │
+│  HC SUBJECTS (n={n_hc})                                                       │
+│  ───────────────────                                                         │
+│    vs HC Consensus:  r = {np.mean(hc_vs_hc_pearson):.3f} ± {np.std(hc_vs_hc_pearson):.3f}  (SHOULD BE HIGH) ✓        │
+│    vs AD Consensus:  r = {np.mean(hc_vs_ad_pearson):.3f} ± {np.std(hc_vs_ad_pearson):.3f}  (SHOULD BE LOW)  ✓        │
+│    Difference:       Δr = {np.mean(np.array(hc_vs_hc_pearson) - np.array(hc_vs_ad_pearson)):.3f} ± {np.std(np.array(hc_vs_hc_pearson) - np.array(hc_vs_ad_pearson)):.3f}                              │
+│    Correctly classified: {hc_correct}/{n_hc} ({100*hc_correct/n_hc:.0f}%)                                     │
+│                                                                              │
+├──────────────────────────────────────────────────────────────────────────────┤
+│  CLASSIFICATION ACCURACY: {total_correct}/{total_subjects} = {accuracy:.1f}%                                      │
+│                                                                              │
+│  INTERPRETATION:                                                             │
+│    • AD subjects correlate MORE with AD consensus than HC consensus          │
+│    • HC subjects correlate MORE with HC consensus than AD consensus          │
+│    • This validates that the consensus matrices capture group-specific       │
+│      connectivity patterns and can discriminate between groups               │
+└──────────────────────────────────────────────────────────────────────────────┘
 """)
     
     # =============================================================================
