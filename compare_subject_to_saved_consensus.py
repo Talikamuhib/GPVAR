@@ -6,31 +6,20 @@ COMPARING CONNECTIVITY MATRICES - EACH SUBJECT vs SAVED CONSENSUS
 This script compares each individual subject against a PRE-COMPUTED consensus 
 matrix loaded from a saved .npy file.
 
-KEY FEATURE: 
-- First calculates the SPARSITY/DENSITY of the consensus matrix
-- For each subject, matches the density by keeping only the TOP N edges
-- This ensures fair comparison with the same number of edges
+KEY FEATURES: 
+- Calculates the SPARSITY/DENSITY of the consensus matrix
+- Matches density by keeping only the TOP N edges for fair comparison
+- Uses TWO complementary metrics:
+  * PEARSON CORRELATION - weight similarity
+  * JACCARD SIMILARITY - binary edge overlap
 
-SIMILARITY METRICS:
-- PEARSON CORRELATION: Measures weight similarity (how similar are connection strengths)
-- JACCARD SIMILARITY: Measures binary edge overlap (do they have the same connections)
-
-Consensus Matrix Path:
-/home/muhibt/GPVAR/consensus_results/ALL_Files/consensus_distance_graph.npy
-
-Outputs (saved to output folder):
-- consensus_matrix.npy - Copy of the consensus matrix used
-- subject_vs_saved_consensus.csv - Pearson r and Jaccard similarity for each subject
-- figure1_consensus_overview.png - Consensus matrix visualization
-- figure2_pearson_analysis.png - Pearson correlation analysis
-- figure3_jaccard_analysis.png - Jaccard similarity analysis
-- figure4_combined_analysis.png - Combined comparison
-- figure5_subject_ranking.png - All subjects ranked
-- figure6_summary.png - Publication-ready summary
-- sparsity_info.txt - Sparsity/density information
+OUTPUT FIGURES:
+- figure1_consensus_overview.png  - Consensus matrix visualization
+- figure2_pearson_analysis.png    - Pearson correlation analysis  
+- figure3_jaccard_analysis.png    - Jaccard similarity analysis
+- figure4_combined_summary.png    - Combined publication-ready summary
 
 RUN: python compare_subject_to_saved_consensus.py
-
 =============================================================================
 """
 
@@ -38,63 +27,54 @@ import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
 import matplotlib.gridspec as gridspec
+from matplotlib.patches import Patch
 from scipy import stats
 from pathlib import Path
 import warnings
 import logging
-import os
-from datetime import datetime
 
 warnings.filterwarnings('ignore')
-
-# Configure logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
 # =============================================================================
-# STYLE SETTINGS FOR THESIS-QUALITY FIGURES
+# FIGURE STYLE SETTINGS
 # =============================================================================
-plt.style.use('seaborn-v0_8-whitegrid')
 plt.rcParams.update({
-    'font.size': 12,
-    'font.family': 'sans-serif',
-    'axes.labelsize': 13,
-    'axes.titlesize': 14,
-    'xtick.labelsize': 11,
-    'ytick.labelsize': 11,
-    'legend.fontsize': 11,
-    'figure.titlesize': 16,
+    'font.size': 11,
+    'axes.labelsize': 12,
+    'axes.titlesize': 13,
+    'xtick.labelsize': 10,
+    'ytick.labelsize': 10,
+    'legend.fontsize': 10,
+    'figure.titlesize': 15,
     'axes.spines.top': False,
     'axes.spines.right': False,
+    'axes.grid': True,
+    'grid.alpha': 0.3,
 })
 
-# Color palette
+# Color scheme
 COLORS = {
-    'AD': '#E74C3C',      # Red for AD
-    'HC': '#3498DB',      # Blue for HC
-    'pearson': '#27AE60', # Green for Pearson
-    'jaccard': '#8E44AD', # Purple for Jaccard
-    'consensus': '#F39C12', # Orange for consensus
-    'shared': '#2ECC71',  # Light green for shared
-    'grid': '#ECF0F1',    # Light gray for grid
+    'AD': '#E74C3C',       # Red
+    'HC': '#3498DB',       # Blue
+    'consensus': '#F39C12', # Orange
+    'shared': '#27AE60',   # Green
+    'mean_line': '#2C3E50', # Dark
 }
 
 print("="*70)
-print("COMPARING EACH SUBJECT vs SAVED CONSENSUS MATRIX")
-print("Using: PEARSON CORRELATION + JACCARD SIMILARITY")
+print("SUBJECT vs CONSENSUS COMPARISON")
+print("Metrics: PEARSON CORRELATION + JACCARD SIMILARITY")
 print("="*70)
 
 # =============================================================================
 # PATHS
 # =============================================================================
-
-# Path to the saved consensus matrix
 CONSENSUS_MATRIX_PATH = "/home/muhibt/GPVAR/consensus_results/ALL_Files/consensus_distance_graph.npy"
-
-# Output folder for all results
 OUTPUT_FOLDER = Path("subject_vs_consensus_results")
 
-# AD Group Files (Alzheimer's Disease)
+# File lists
 AD_FILES = [
     '/home/muhibt/project/filter_identification/data/synapse_data/1_AD/AR/sub-30018/eeg/s6_sub-30018_rs-hep_eeg.set',
     '/home/muhibt/project/filter_identification/data/synapse_data/1_AD/AR/sub-30026/eeg/s6_sub-30026_rs-hep_eeg.set',
@@ -133,7 +113,6 @@ AD_FILES = [
     '/home/muhibt/project/filter_identification/data/synapse_data/1_AD/CL/sub-30035/eeg/s6_sub-30035_rs-hep_eeg.set',
 ]
 
-# HC Group Files (Healthy Controls)
 HC_FILES = [
     '/home/muhibt/project/filter_identification/data/synapse_data/5_HC/AR/sub-10002/eeg/s6_sub-10002_rs_eeg.set',
     '/home/muhibt/project/filter_identification/data/synapse_data/5_HC/AR/sub-10009/eeg/s6_sub-10009_rs_eeg.set',
@@ -168,290 +147,216 @@ HC_FILES = [
     '/home/muhibt/project/filter_identification/data/synapse_data/5_HC/CL/sub-100043/eeg/s6_sub-100043_rs_eeg.set',
 ]
 
-
 # =============================================================================
 # HELPER FUNCTIONS
 # =============================================================================
 
-def create_output_folder(folder_path):
-    """Create output folder if it doesn't exist."""
-    folder_path = Path(folder_path)
-    folder_path.mkdir(parents=True, exist_ok=True)
-    return folder_path
-
-
 def extract_subject_id(filepath):
     """Extract subject ID from filepath."""
-    path = Path(filepath)
-    for part in path.parts:
+    for part in Path(filepath).parts:
         if part.startswith('sub-'):
             return part
-    return path.stem
+    return Path(filepath).stem
 
 
 def load_eeg_data(filepath):
-    """Load EEG data from .set file (EEGLAB format)."""
+    """Load EEG data from .set file."""
     try:
         import mne
-        from mne.channels import make_standard_montage
-        
         raw = mne.io.read_raw_eeglab(filepath, preload=True, verbose=False)
-        
         if raw.get_montage() is None:
             try:
-                biosemi_montage = make_standard_montage("biosemi128")
-                raw.set_montage(biosemi_montage, on_missing='warn')
-            except Exception:
+                from mne.channels import make_standard_montage
+                raw.set_montage(make_standard_montage("biosemi128"), on_missing='warn')
+            except:
                 pass
-        
-        data = raw.get_data()
-        return data
-        
+        return raw.get_data()
     except Exception as e:
         logger.warning(f"Failed to load {filepath}: {e}")
         return None
 
 
-def compute_correlation_matrix(data, absolute=True):
-    """Compute Pearson correlation matrix from EEG data."""
-    corr_matrix = np.corrcoef(data)
-    corr_matrix = np.nan_to_num(corr_matrix, nan=0.0)
-    
-    if absolute:
-        corr_matrix = np.abs(corr_matrix)
-        
-    np.fill_diagonal(corr_matrix, 0)
-    return corr_matrix
+def compute_correlation_matrix(data):
+    """Compute absolute Pearson correlation matrix."""
+    corr = np.abs(np.corrcoef(data))
+    corr = np.nan_to_num(corr, nan=0.0)
+    np.fill_diagonal(corr, 0)
+    return corr
 
 
-def calculate_sparsity(matrix, threshold=0):
-    """Calculate sparsity/density of a matrix."""
+def calculate_sparsity(matrix):
+    """Calculate sparsity info for a matrix."""
     n = matrix.shape[0]
     triu_idx = np.triu_indices(n, k=1)
     values = matrix[triu_idx]
-    
-    total_possible = len(values)
-    n_edges = np.sum(values > threshold)
-    density = n_edges / total_possible
-    
+    n_edges = np.sum(values > 0)
+    total = len(values)
     return {
         'n_channels': n,
-        'total_possible_edges': total_possible,
+        'total_possible_edges': total,
         'n_edges': int(n_edges),
-        'density': density,
-        'sparsity': 1 - density,
-        'mean_weight': np.mean(values[values > threshold]) if n_edges > 0 else 0,
-        'max_weight': np.max(values) if len(values) > 0 else 0,
-        'min_nonzero_weight': np.min(values[values > threshold]) if n_edges > 0 else 0
+        'density': n_edges / total,
+        'sparsity': 1 - n_edges / total,
+        'mean_weight': np.mean(values[values > 0]) if n_edges > 0 else 0,
+        'max_weight': np.max(values),
+        'min_nonzero': np.min(values[values > 0]) if n_edges > 0 else 0
     }
 
 
-def threshold_matrix_to_density(matrix, n_edges_to_keep):
-    """Threshold a matrix to keep only the top N edges by weight."""
+def threshold_to_density(matrix, n_edges):
+    """Keep top N edges as binary matrix."""
     n = matrix.shape[0]
     triu_idx = np.triu_indices(n, k=1)
     values = matrix[triu_idx]
     
-    if n_edges_to_keep >= len(values):
+    if n_edges >= len(values):
         threshold = 0
-    elif n_edges_to_keep <= 0:
-        threshold = np.max(values) + 1
     else:
-        sorted_values = np.sort(values)[::-1]
-        threshold = sorted_values[n_edges_to_keep - 1]
+        threshold = np.sort(values)[::-1][n_edges - 1]
     
-    binary_matrix = np.zeros_like(matrix)
-    binary_matrix[matrix >= threshold] = 1
-    np.fill_diagonal(binary_matrix, 0)
-    binary_matrix = np.maximum(binary_matrix, binary_matrix.T)
-    
-    return binary_matrix
+    binary = np.zeros_like(matrix)
+    binary[matrix >= threshold] = 1
+    np.fill_diagonal(binary, 0)
+    return np.maximum(binary, binary.T)
 
 
-def compute_pearson_correlation(subject_values, consensus_values):
-    """Compute Pearson correlation coefficient."""
-    r, p = stats.pearsonr(subject_values, consensus_values)
-    return r, p
-
-
-def compute_jaccard_similarity(subject_binary, consensus_binary):
-    """Compute Jaccard similarity between two binary edge sets."""
-    intersection = np.sum((subject_binary == 1) & (consensus_binary == 1))
-    union = np.sum((subject_binary == 1) | (consensus_binary == 1))
-    jaccard = intersection / union if union > 0 else 0
-    return jaccard, int(intersection), int(union)
-
-
-def cohens_d(group1, group2):
+def cohens_d(g1, g2):
     """Compute Cohen's d effect size."""
-    n1, n2 = len(group1), len(group2)
-    var1, var2 = group1.var(), group2.var()
-    pooled_std = np.sqrt(((n1-1)*var1 + (n2-1)*var2) / (n1+n2-2))
-    return (group1.mean() - group2.mean()) / pooled_std if pooled_std > 0 else 0
+    n1, n2 = len(g1), len(g2)
+    pooled_std = np.sqrt(((n1-1)*g1.var() + (n2-1)*g2.var()) / (n1+n2-2))
+    return (g1.mean() - g2.mean()) / pooled_std if pooled_std > 0 else 0
 
 
-def compare_to_consensus_density_matched(subject_matrix, consensus_matrix, consensus_n_edges):
+def compare_to_consensus(subject_matrix, consensus_matrix, n_edges):
     """Compare subject to consensus with density matching."""
     n = subject_matrix.shape[0]
     triu_idx = np.triu_indices(n, k=1)
     
-    consensus_values = consensus_matrix[triu_idx]
-    consensus_binary = (consensus_values > 0).astype(int)
+    cons_values = consensus_matrix[triu_idx]
+    cons_binary = (cons_values > 0).astype(int)
     
-    subject_binary_matrix = threshold_matrix_to_density(subject_matrix, consensus_n_edges)
-    subject_binary = subject_binary_matrix[triu_idx].astype(int)
-    subject_values = subject_matrix[triu_idx]
+    subj_binary = threshold_to_density(subject_matrix, n_edges)[triu_idx].astype(int)
+    subj_values = subject_matrix[triu_idx]
     
-    results = {}
+    # Pearson correlation
+    r, p = stats.pearsonr(subj_values, cons_values)
     
-    # PEARSON CORRELATION
-    r_full, p_full = compute_pearson_correlation(subject_values, consensus_values)
-    results['Pearson_r'] = r_full
-    results['Pearson_p'] = p_full
+    # Jaccard similarity
+    intersection = np.sum((subj_binary == 1) & (cons_binary == 1))
+    union = np.sum((subj_binary == 1) | (cons_binary == 1))
+    jaccard = intersection / union if union > 0 else 0
     
-    # JACCARD SIMILARITY
-    jaccard, intersection, union = compute_jaccard_similarity(subject_binary, consensus_binary)
-    results['Jaccard'] = jaccard
-    results['N_Shared_Edges'] = intersection
-    results['N_Union_Edges'] = union
-    results['N_Subject_Edges'] = int(np.sum(subject_binary))
-    results['N_Consensus_Edges'] = int(np.sum(consensus_binary))
+    # Dice coefficient
+    dice = 2 * intersection / (np.sum(subj_binary) + np.sum(cons_binary))
     
-    # Additional metrics
-    dice = 2 * intersection / (np.sum(subject_binary) + np.sum(consensus_binary))
-    results['Dice'] = dice if (np.sum(subject_binary) + np.sum(consensus_binary)) > 0 else 0
-    
-    rho, _ = stats.spearmanr(subject_values, consensus_values)
-    results['Spearman_rho'] = rho
-    
-    norm_subj = np.linalg.norm(subject_values)
-    norm_cons = np.linalg.norm(consensus_values)
-    if norm_subj > 0 and norm_cons > 0:
-        results['Cosine_Similarity'] = np.dot(subject_values, consensus_values) / (norm_subj * norm_cons)
-    else:
-        results['Cosine_Similarity'] = 0
-    
-    results['Mean_Abs_Diff'] = np.mean(np.abs(subject_values - consensus_values))
-    results['RMSD'] = np.sqrt(np.mean((subject_values - consensus_values)**2))
-    
-    return results
+    return {
+        'Pearson_r': r, 'Pearson_p': p,
+        'Jaccard': jaccard, 'Dice': dice,
+        'N_Shared': int(intersection),
+        'N_Subject': int(np.sum(subj_binary)),
+        'N_Consensus': int(np.sum(cons_binary))
+    }
 
 
 # =============================================================================
 # VISUALIZATION FUNCTIONS
 # =============================================================================
 
-def create_figure1_consensus_overview(consensus_matrix, sparsity_info, output_folder, 
-                                       best_matrix, worst_matrix, best_info, worst_info,
-                                       consensus_n_edges):
-    """
-    FIGURE 1: Consensus Matrix Overview
-    Shows the consensus matrix and example subjects
-    """
-    fig = plt.figure(figsize=(16, 12))
-    gs = gridspec.GridSpec(2, 3, figure=fig, hspace=0.3, wspace=0.3)
+def create_figure1(consensus_matrix, sparsity_info, best_matrix, worst_matrix, 
+                   best_info, worst_info, n_edges, output_folder):
+    """Figure 1: Consensus Matrix Overview"""
     
-    n_channels = consensus_matrix.shape[0]
+    fig = plt.figure(figsize=(16, 10))
+    gs = gridspec.GridSpec(2, 3, figure=fig, hspace=0.3, wspace=0.25)
     
-    # 1A: Consensus Matrix (weighted)
+    n = consensus_matrix.shape[0]
+    
+    # 1A: Consensus weighted
     ax1 = fig.add_subplot(gs[0, 0])
     vmax = np.percentile(consensus_matrix[consensus_matrix > 0], 95) if np.any(consensus_matrix > 0) else 1
-    im1 = ax1.imshow(consensus_matrix, cmap='hot', vmin=0, vmax=vmax, aspect='equal')
-    ax1.set_title('A) Consensus Matrix\n(Weighted)', fontsize=14, fontweight='bold')
-    ax1.set_xlabel('Channel', fontsize=12)
-    ax1.set_ylabel('Channel', fontsize=12)
-    cbar1 = plt.colorbar(im1, ax=ax1, fraction=0.046, pad=0.04)
-    cbar1.set_label('Connection Strength', fontsize=11)
+    im1 = ax1.imshow(consensus_matrix, cmap='hot', vmin=0, vmax=vmax)
+    ax1.set_title(f'(A) Consensus Matrix\n{n_edges:,} edges, {sparsity_info["density"]*100:.1f}% density', 
+                  fontweight='bold', fontsize=12)
+    ax1.set_xlabel('Channel')
+    ax1.set_ylabel('Channel')
+    cbar1 = plt.colorbar(im1, ax=ax1, fraction=0.046)
+    cbar1.set_label('Weight')
     
-    # 1B: Consensus Binary
+    # 1B: Consensus binary
     ax2 = fig.add_subplot(gs[0, 1])
-    consensus_binary = (consensus_matrix > 0).astype(float)
-    im2 = ax2.imshow(consensus_binary, cmap='Blues', vmin=0, vmax=1, aspect='equal')
-    ax2.set_title(f'B) Consensus Binary\n({sparsity_info["n_edges"]:,} edges)', fontsize=14, fontweight='bold')
-    ax2.set_xlabel('Channel', fontsize=12)
-    ax2.set_ylabel('Channel', fontsize=12)
-    cbar2 = plt.colorbar(im2, ax=ax2, fraction=0.046, pad=0.04)
-    cbar2.set_label('Edge Present', fontsize=11)
+    im2 = ax2.imshow((consensus_matrix > 0).astype(float), cmap='Blues', vmin=0, vmax=1)
+    ax2.set_title(f'(B) Consensus Binary\n{n_edges:,} edges', fontweight='bold', fontsize=12)
+    ax2.set_xlabel('Channel')
+    ax2.set_ylabel('Channel')
+    plt.colorbar(im2, ax=ax2, fraction=0.046)
     
-    # 1C: Sparsity Information Box
+    # 1C: Sparsity info box
     ax3 = fig.add_subplot(gs[0, 2])
     ax3.axis('off')
-    
     info_text = f"""
-    CONSENSUS MATRIX PROPERTIES
-    ════════════════════════════════
+    ══════════════════════════════
+         CONSENSUS PROPERTIES
+    ══════════════════════════════
     
-    Matrix Size:     {n_channels} × {n_channels}
+    Matrix Size:    {n} × {n}
     
-    Total Possible:  {sparsity_info['total_possible_edges']:,} edges
+    Total Possible: {sparsity_info['total_possible_edges']:,}
     
-    Actual Edges:    {sparsity_info['n_edges']:,} edges
+    Actual Edges:   {n_edges:,}
     
-    Density:         {sparsity_info['density']*100:.2f}%
+    Density:        {sparsity_info['density']*100:.2f}%
     
-    Sparsity:        {sparsity_info['sparsity']*100:.2f}%
-    
-    ════════════════════════════════
-    Edge Weights (non-zero):
-    
-      Mean:  {sparsity_info['mean_weight']:.4f}
-      Max:   {sparsity_info['max_weight']:.4f}
-      Min:   {sparsity_info['min_nonzero_weight']:.4f}
+    ──────────────────────────────
+    Edge Weights:
+      Mean: {sparsity_info['mean_weight']:.4f}
+      Max:  {sparsity_info['max_weight']:.4f}
+      Min:  {sparsity_info['min_nonzero']:.4f}
+    ══════════════════════════════
     """
+    ax3.text(0.1, 0.9, info_text, transform=ax3.transAxes, fontsize=11,
+             verticalalignment='top', fontfamily='monospace',
+             bbox=dict(boxstyle='round', facecolor='lightcyan', edgecolor='steelblue', alpha=0.9))
     
-    ax3.text(0.1, 0.95, info_text, transform=ax3.transAxes,
-             fontsize=12, verticalalignment='top', fontfamily='monospace',
-             bbox=dict(boxstyle='round,pad=0.5', facecolor='lightcyan', alpha=0.9, edgecolor='steelblue'))
-    ax3.set_title('C) Sparsity Analysis', fontsize=14, fontweight='bold')
-    
-    # 1D: Best Subject
+    # 1D: Best subject
     ax4 = fig.add_subplot(gs[1, 0])
-    best_binary = threshold_matrix_to_density(best_matrix, consensus_n_edges)
-    im4 = ax4.imshow(best_binary, cmap='Greens', vmin=0, vmax=1, aspect='equal')
-    ax4.set_title(f'D) Best Match: {best_info["id"]}\nPearson r = {best_info["pearson"]:.3f}, Jaccard = {best_info["jaccard"]:.3f}', 
-                  fontsize=13, fontweight='bold', color='darkgreen')
-    ax4.set_xlabel('Channel', fontsize=12)
-    ax4.set_ylabel('Channel', fontsize=12)
-    plt.colorbar(im4, ax=ax4, fraction=0.046, pad=0.04)
+    best_bin = threshold_to_density(best_matrix, n_edges)
+    im4 = ax4.imshow(best_bin, cmap='Greens', vmin=0, vmax=1)
+    ax4.set_title(f'(D) Best Match: {best_info["id"]}\nPearson={best_info["pearson"]:.3f}, Jaccard={best_info["jaccard"]:.3f}', 
+                  fontweight='bold', fontsize=11, color='darkgreen')
+    ax4.set_xlabel('Channel')
+    ax4.set_ylabel('Channel')
+    plt.colorbar(im4, ax=ax4, fraction=0.046)
     
-    # 1E: Worst Subject
+    # 1E: Worst subject
     ax5 = fig.add_subplot(gs[1, 1])
-    worst_binary = threshold_matrix_to_density(worst_matrix, consensus_n_edges)
-    im5 = ax5.imshow(worst_binary, cmap='Reds', vmin=0, vmax=1, aspect='equal')
-    ax5.set_title(f'E) Worst Match: {worst_info["id"]}\nPearson r = {worst_info["pearson"]:.3f}, Jaccard = {worst_info["jaccard"]:.3f}', 
-                  fontsize=13, fontweight='bold', color='darkred')
-    ax5.set_xlabel('Channel', fontsize=12)
-    ax5.set_ylabel('Channel', fontsize=12)
-    plt.colorbar(im5, ax=ax5, fraction=0.046, pad=0.04)
+    worst_bin = threshold_to_density(worst_matrix, n_edges)
+    im5 = ax5.imshow(worst_bin, cmap='Reds', vmin=0, vmax=1)
+    ax5.set_title(f'(E) Worst Match: {worst_info["id"]}\nPearson={worst_info["pearson"]:.3f}, Jaccard={worst_info["jaccard"]:.3f}', 
+                  fontweight='bold', fontsize=11, color='darkred')
+    ax5.set_xlabel('Channel')
+    ax5.set_ylabel('Channel')
+    plt.colorbar(im5, ax=ax5, fraction=0.046)
     
-    # 1F: Edge Overlap Visualization (Best vs Consensus)
+    # 1F: Edge overlap (RGB)
     ax6 = fig.add_subplot(gs[1, 2])
+    cons_bin = consensus_matrix > 0
+    best_b = best_bin > 0
     
-    # Create RGB overlay: Green=shared, Red=consensus only, Blue=subject only
-    overlap = np.zeros((n_channels, n_channels, 3))
-    consensus_bin = (consensus_matrix > 0)
-    best_bin = (best_binary > 0)
+    overlap = np.zeros((n, n, 3))
+    shared = cons_bin & best_b
+    cons_only = cons_bin & ~best_b
+    subj_only = ~cons_bin & best_b
     
-    # Shared edges (Green)
-    shared = consensus_bin & best_bin
-    overlap[:,:,1] = shared.astype(float) * 0.8
+    overlap[:,:,1] = shared * 0.8   # Green = shared
+    overlap[:,:,0] = cons_only * 0.8  # Red = consensus only
+    overlap[:,:,2] = subj_only * 0.8  # Blue = subject only
     
-    # Consensus only (Red)
-    cons_only = consensus_bin & ~best_bin
-    overlap[:,:,0] = cons_only.astype(float) * 0.8
+    ax6.imshow(overlap)
+    ax6.set_title('(F) Edge Overlap (Best Subject)\nGreen=Shared, Red=Consensus, Blue=Subject', 
+                  fontweight='bold', fontsize=11)
+    ax6.set_xlabel('Channel')
+    ax6.set_ylabel('Channel')
     
-    # Subject only (Blue)
-    subj_only = ~consensus_bin & best_bin
-    overlap[:,:,2] = subj_only.astype(float) * 0.8
-    
-    ax6.imshow(overlap, aspect='equal')
-    ax6.set_title(f'F) Edge Overlap (Best Subject)\nGreen=Shared, Red=Consensus only, Blue=Subject only', 
-                  fontsize=13, fontweight='bold')
-    ax6.set_xlabel('Channel', fontsize=12)
-    ax6.set_ylabel('Channel', fontsize=12)
-    
-    # Add legend
-    from matplotlib.patches import Patch
     legend_elements = [
         Patch(facecolor='green', alpha=0.8, label=f'Shared ({np.sum(shared)//2:,})'),
         Patch(facecolor='red', alpha=0.8, label=f'Consensus only ({np.sum(cons_only)//2:,})'),
@@ -459,815 +364,533 @@ def create_figure1_consensus_overview(consensus_matrix, sparsity_info, output_fo
     ]
     ax6.legend(handles=legend_elements, loc='upper right', fontsize=9)
     
-    plt.suptitle('Figure 1: Consensus Matrix Overview', fontsize=16, fontweight='bold', y=0.98)
+    plt.suptitle('Figure 1: Consensus Matrix Overview', fontsize=15, fontweight='bold', y=0.98)
+    plt.savefig(output_folder / 'figure1_consensus_overview.png', dpi=300, bbox_inches='tight', facecolor='white')
+    plt.close()
+    print("  ✓ figure1_consensus_overview.png")
+
+
+def create_figure2(df, ad_df, hc_df, output_folder):
+    """Figure 2: Pearson Correlation Analysis"""
     
-    fig.savefig(output_folder / 'figure1_consensus_overview.png', dpi=300, bbox_inches='tight', facecolor='white')
-    plt.close(fig)
-    print(f"  ✓ Saved: figure1_consensus_overview.png")
-
-
-def create_figure2_pearson_analysis(df_results, ad_results, hc_results, output_folder):
-    """
-    FIGURE 2: Pearson Correlation Analysis
-    Detailed visualization of weight similarity
-    """
     fig = plt.figure(figsize=(16, 10))
     gs = gridspec.GridSpec(2, 3, figure=fig, hspace=0.35, wspace=0.3)
     
-    # Statistical test
-    t_stat, p_val = stats.ttest_ind(ad_results['Pearson_r'], hc_results['Pearson_r'])
-    d = cohens_d(ad_results['Pearson_r'], hc_results['Pearson_r'])
-    sig_str = '***' if p_val < 0.001 else '**' if p_val < 0.01 else '*' if p_val < 0.05 else 'ns'
+    t_stat, p_val = stats.ttest_ind(ad_df['Pearson_r'], hc_df['Pearson_r'])
+    d = cohens_d(ad_df['Pearson_r'], hc_df['Pearson_r'])
+    sig = '***' if p_val < 0.001 else '**' if p_val < 0.01 else '*' if p_val < 0.05 else 'ns'
     
-    # 2A: Boxplot with individual points
+    # 2A: Boxplot
     ax1 = fig.add_subplot(gs[0, 0])
-    
-    bp = ax1.boxplot([ad_results['Pearson_r'], hc_results['Pearson_r']], 
-                     labels=['AD', 'HC'], patch_artist=True, widths=0.5,
-                     medianprops=dict(color='black', linewidth=2))
+    bp = ax1.boxplot([ad_df['Pearson_r'], hc_df['Pearson_r']], labels=['AD', 'HC'],
+                     patch_artist=True, widths=0.6)
     bp['boxes'][0].set_facecolor(COLORS['AD'])
     bp['boxes'][1].set_facecolor(COLORS['HC'])
     for box in bp['boxes']:
         box.set_alpha(0.7)
     
-    # Add individual points with jitter
-    for i, (data, color) in enumerate([(ad_results['Pearson_r'], COLORS['AD']), 
-                                        (hc_results['Pearson_r'], COLORS['HC'])]):
-        x = np.random.normal(i+1, 0.08, size=len(data))
-        ax1.scatter(x, data, alpha=0.6, color=color, s=50, edgecolor='white', linewidth=0.5, zorder=3)
+    # Add points
+    for i, (data, color) in enumerate([(ad_df['Pearson_r'], COLORS['AD']), 
+                                        (hc_df['Pearson_r'], COLORS['HC'])]):
+        x = np.random.normal(i+1, 0.06, size=len(data))
+        ax1.scatter(x, data, alpha=0.6, color=color, s=40, edgecolor='white', zorder=3)
     
-    # Add significance bar
-    y_max = max(ad_results['Pearson_r'].max(), hc_results['Pearson_r'].max())
-    ax1.plot([1, 2], [y_max + 0.02, y_max + 0.02], 'k-', linewidth=1.5)
-    ax1.text(1.5, y_max + 0.025, f'{sig_str}\np = {p_val:.4f}', ha='center', fontsize=11, fontweight='bold')
+    # Significance bar
+    y_max = max(ad_df['Pearson_r'].max(), hc_df['Pearson_r'].max())
+    ax1.plot([1, 2], [y_max + 0.02, y_max + 0.02], 'k-', lw=1.5)
+    ax1.text(1.5, y_max + 0.03, f'{sig} (p={p_val:.4f})', ha='center', fontsize=11, fontweight='bold')
     
-    ax1.set_ylabel('Pearson Correlation (r)', fontsize=13)
-    ax1.set_title('A) Group Comparison', fontsize=14, fontweight='bold')
-    ax1.set_ylim([None, y_max + 0.08])
+    ax1.set_ylabel('Pearson Correlation (r)', fontsize=12)
+    ax1.set_title(f'(A) Group Comparison\nCohen\'s d = {d:.3f}', fontweight='bold', fontsize=12)
     
     # 2B: Histogram
     ax2 = fig.add_subplot(gs[0, 1])
+    bins = np.linspace(df['Pearson_r'].min() - 0.03, df['Pearson_r'].max() + 0.03, 20)
+    ax2.hist(ad_df['Pearson_r'], bins=bins, alpha=0.6, color=COLORS['AD'], 
+             label=f'AD (n={len(ad_df)})', edgecolor='white')
+    ax2.hist(hc_df['Pearson_r'], bins=bins, alpha=0.6, color=COLORS['HC'], 
+             label=f'HC (n={len(hc_df)})', edgecolor='white')
+    ax2.axvline(ad_df['Pearson_r'].mean(), color=COLORS['AD'], ls='--', lw=2.5)
+    ax2.axvline(hc_df['Pearson_r'].mean(), color=COLORS['HC'], ls='--', lw=2.5)
+    ax2.set_xlabel('Pearson r', fontsize=12)
+    ax2.set_ylabel('Count', fontsize=12)
+    ax2.set_title('(B) Distribution', fontweight='bold', fontsize=12)
+    ax2.legend(loc='upper left')
     
-    bins = np.linspace(min(df_results['Pearson_r'].min(), 0) - 0.05, 
-                       df_results['Pearson_r'].max() + 0.05, 25)
-    
-    ax2.hist(ad_results['Pearson_r'], bins=bins, alpha=0.6, color=COLORS['AD'], 
-             label=f'AD (n={len(ad_results)})', edgecolor='white', linewidth=1)
-    ax2.hist(hc_results['Pearson_r'], bins=bins, alpha=0.6, color=COLORS['HC'], 
-             label=f'HC (n={len(hc_results)})', edgecolor='white', linewidth=1)
-    
-    # Add mean lines
-    ax2.axvline(ad_results['Pearson_r'].mean(), color=COLORS['AD'], linestyle='--', 
-                linewidth=2.5, label=f'AD mean: {ad_results["Pearson_r"].mean():.3f}')
-    ax2.axvline(hc_results['Pearson_r'].mean(), color=COLORS['HC'], linestyle='--', 
-                linewidth=2.5, label=f'HC mean: {hc_results["Pearson_r"].mean():.3f}')
-    
-    ax2.set_xlabel('Pearson Correlation (r)', fontsize=13)
-    ax2.set_ylabel('Count', fontsize=13)
-    ax2.set_title('B) Distribution', fontsize=14, fontweight='bold')
-    ax2.legend(loc='upper left', fontsize=10)
-    
-    # 2C: Violin plot
+    # 2C: Violin
     ax3 = fig.add_subplot(gs[0, 2])
-    
-    parts = ax3.violinplot([ad_results['Pearson_r'], hc_results['Pearson_r']], 
-                           positions=[1, 2], showmeans=True, showmedians=True, widths=0.7)
-    
+    parts = ax3.violinplot([ad_df['Pearson_r'], hc_df['Pearson_r']], positions=[1, 2],
+                           showmeans=True, showmedians=True, widths=0.7)
     for i, pc in enumerate(parts['bodies']):
         pc.set_facecolor([COLORS['AD'], COLORS['HC']][i])
         pc.set_alpha(0.7)
-        pc.set_edgecolor('black')
-    
-    parts['cmeans'].set_color('black')
-    parts['cmeans'].set_linewidth(2)
-    parts['cmedians'].set_color('white')
-    parts['cmedians'].set_linewidth(2)
-    
     ax3.set_xticks([1, 2])
     ax3.set_xticklabels(['AD', 'HC'])
-    ax3.set_ylabel('Pearson Correlation (r)', fontsize=13)
-    ax3.set_title('C) Violin Plot', fontsize=14, fontweight='bold')
+    ax3.set_ylabel('Pearson r', fontsize=12)
+    ax3.set_title('(C) Violin Plot', fontweight='bold', fontsize=12)
     
-    # 2D: Individual subject bar chart
+    # 2D: All subjects ranked
     ax4 = fig.add_subplot(gs[1, :])
-    
-    df_sorted = df_results.sort_values('Pearson_r', ascending=False).reset_index(drop=True)
-    colors_bar = [COLORS['AD'] if g == 'AD' else COLORS['HC'] for g in df_sorted['Group']]
-    
-    bars = ax4.bar(range(len(df_sorted)), df_sorted['Pearson_r'], color=colors_bar, alpha=0.8, edgecolor='white')
-    
-    ax4.axhline(y=df_results['Pearson_r'].mean(), color='black', linestyle='-', linewidth=2, 
-                label=f'Overall mean: {df_results["Pearson_r"].mean():.3f}')
-    ax4.axhline(y=ad_results['Pearson_r'].mean(), color=COLORS['AD'], linestyle='--', linewidth=2, 
-                label=f'AD mean: {ad_results["Pearson_r"].mean():.3f}')
-    ax4.axhline(y=hc_results['Pearson_r'].mean(), color=COLORS['HC'], linestyle='--', linewidth=2, 
-                label=f'HC mean: {hc_results["Pearson_r"].mean():.3f}')
-    
-    ax4.set_xlabel('Subject Rank (by Pearson r)', fontsize=13)
-    ax4.set_ylabel('Pearson Correlation (r)', fontsize=13)
-    ax4.set_title('D) All Subjects Ranked by Pearson Correlation', fontsize=14, fontweight='bold')
+    df_sorted = df.sort_values('Pearson_r', ascending=False).reset_index(drop=True)
+    colors = [COLORS['AD'] if g == 'AD' else COLORS['HC'] for g in df_sorted['Group']]
+    ax4.bar(range(len(df_sorted)), df_sorted['Pearson_r'], color=colors, alpha=0.8, edgecolor='white')
+    ax4.axhline(df['Pearson_r'].mean(), color=COLORS['mean_line'], ls='-', lw=2, 
+                label=f'Mean: {df["Pearson_r"].mean():.3f}')
+    ax4.axhline(ad_df['Pearson_r'].mean(), color=COLORS['AD'], ls='--', lw=2)
+    ax4.axhline(hc_df['Pearson_r'].mean(), color=COLORS['HC'], ls='--', lw=2)
+    ax4.set_xlabel('Subject Rank', fontsize=12)
+    ax4.set_ylabel('Pearson r', fontsize=12)
+    ax4.set_title('(D) All Subjects Ranked by Pearson Correlation', fontweight='bold', fontsize=12)
     ax4.set_xlim([-1, len(df_sorted)])
-    ax4.legend(loc='upper right', fontsize=10)
     
-    # Add color legend
-    from matplotlib.patches import Patch
     legend_elements = [Patch(facecolor=COLORS['AD'], alpha=0.8, label='AD'),
                        Patch(facecolor=COLORS['HC'], alpha=0.8, label='HC')]
-    ax4.legend(handles=legend_elements + ax4.get_legend_handles_labels()[0], loc='upper right', fontsize=10)
+    ax4.legend(handles=legend_elements, loc='upper right')
     
-    plt.suptitle(f'Figure 2: Pearson Correlation Analysis\n(Weight Similarity: r measures how similar connection strengths are)', 
-                 fontsize=16, fontweight='bold', y=0.98)
+    plt.suptitle('Figure 2: Pearson Correlation Analysis\n(Weight Similarity)', 
+                 fontsize=15, fontweight='bold', y=0.99)
     
-    # Add stats box
-    stats_text = f"t = {t_stat:.3f}, p = {p_val:.4f}, Cohen's d = {d:.3f}"
-    fig.text(0.5, 0.01, stats_text, ha='center', fontsize=12, style='italic',
+    # Stats annotation
+    fig.text(0.5, 0.01, f't = {t_stat:.3f}, p = {p_val:.4f}, Cohen\'s d = {d:.3f}',
+             ha='center', fontsize=11, style='italic',
              bbox=dict(boxstyle='round', facecolor='lightyellow', alpha=0.8))
     
-    fig.savefig(output_folder / 'figure2_pearson_analysis.png', dpi=300, bbox_inches='tight', facecolor='white')
-    plt.close(fig)
-    print(f"  ✓ Saved: figure2_pearson_analysis.png")
+    plt.savefig(output_folder / 'figure2_pearson_analysis.png', dpi=300, bbox_inches='tight', facecolor='white')
+    plt.close()
+    print("  ✓ figure2_pearson_analysis.png")
 
 
-def create_figure3_jaccard_analysis(df_results, ad_results, hc_results, consensus_n_edges, output_folder):
-    """
-    FIGURE 3: Jaccard Similarity Analysis
-    Detailed visualization of binary edge overlap
-    """
+def create_figure3(df, ad_df, hc_df, n_edges, output_folder):
+    """Figure 3: Jaccard Similarity Analysis"""
+    
     fig = plt.figure(figsize=(16, 10))
     gs = gridspec.GridSpec(2, 3, figure=fig, hspace=0.35, wspace=0.3)
     
-    # Statistical test
-    t_stat, p_val = stats.ttest_ind(ad_results['Jaccard'], hc_results['Jaccard'])
-    d = cohens_d(ad_results['Jaccard'], hc_results['Jaccard'])
-    sig_str = '***' if p_val < 0.001 else '**' if p_val < 0.01 else '*' if p_val < 0.05 else 'ns'
+    t_stat, p_val = stats.ttest_ind(ad_df['Jaccard'], hc_df['Jaccard'])
+    d = cohens_d(ad_df['Jaccard'], hc_df['Jaccard'])
+    sig = '***' if p_val < 0.001 else '**' if p_val < 0.01 else '*' if p_val < 0.05 else 'ns'
     
-    # 3A: Boxplot with individual points
+    # 3A: Boxplot
     ax1 = fig.add_subplot(gs[0, 0])
-    
-    bp = ax1.boxplot([ad_results['Jaccard'], hc_results['Jaccard']], 
-                     labels=['AD', 'HC'], patch_artist=True, widths=0.5,
-                     medianprops=dict(color='black', linewidth=2))
+    bp = ax1.boxplot([ad_df['Jaccard'], hc_df['Jaccard']], labels=['AD', 'HC'],
+                     patch_artist=True, widths=0.6)
     bp['boxes'][0].set_facecolor(COLORS['AD'])
     bp['boxes'][1].set_facecolor(COLORS['HC'])
     for box in bp['boxes']:
         box.set_alpha(0.7)
     
-    for i, (data, color) in enumerate([(ad_results['Jaccard'], COLORS['AD']), 
-                                        (hc_results['Jaccard'], COLORS['HC'])]):
-        x = np.random.normal(i+1, 0.08, size=len(data))
-        ax1.scatter(x, data, alpha=0.6, color=color, s=50, edgecolor='white', linewidth=0.5, zorder=3)
+    for i, (data, color) in enumerate([(ad_df['Jaccard'], COLORS['AD']), 
+                                        (hc_df['Jaccard'], COLORS['HC'])]):
+        x = np.random.normal(i+1, 0.06, size=len(data))
+        ax1.scatter(x, data, alpha=0.6, color=color, s=40, edgecolor='white', zorder=3)
     
-    y_max = max(ad_results['Jaccard'].max(), hc_results['Jaccard'].max())
-    ax1.plot([1, 2], [y_max + 0.02, y_max + 0.02], 'k-', linewidth=1.5)
-    ax1.text(1.5, y_max + 0.025, f'{sig_str}\np = {p_val:.4f}', ha='center', fontsize=11, fontweight='bold')
+    y_max = max(ad_df['Jaccard'].max(), hc_df['Jaccard'].max())
+    ax1.plot([1, 2], [y_max + 0.02, y_max + 0.02], 'k-', lw=1.5)
+    ax1.text(1.5, y_max + 0.03, f'{sig} (p={p_val:.4f})', ha='center', fontsize=11, fontweight='bold')
     
-    ax1.set_ylabel('Jaccard Similarity', fontsize=13)
-    ax1.set_title('A) Group Comparison', fontsize=14, fontweight='bold')
-    ax1.set_ylim([None, y_max + 0.08])
+    ax1.set_ylabel('Jaccard Similarity', fontsize=12)
+    ax1.set_title(f'(A) Group Comparison\nCohen\'s d = {d:.3f}', fontweight='bold', fontsize=12)
     
     # 3B: Histogram
     ax2 = fig.add_subplot(gs[0, 1])
+    bins = np.linspace(df['Jaccard'].min() - 0.02, df['Jaccard'].max() + 0.02, 20)
+    ax2.hist(ad_df['Jaccard'], bins=bins, alpha=0.6, color=COLORS['AD'], 
+             label=f'AD (n={len(ad_df)})', edgecolor='white')
+    ax2.hist(hc_df['Jaccard'], bins=bins, alpha=0.6, color=COLORS['HC'], 
+             label=f'HC (n={len(hc_df)})', edgecolor='white')
+    ax2.axvline(ad_df['Jaccard'].mean(), color=COLORS['AD'], ls='--', lw=2.5)
+    ax2.axvline(hc_df['Jaccard'].mean(), color=COLORS['HC'], ls='--', lw=2.5)
+    ax2.set_xlabel('Jaccard', fontsize=12)
+    ax2.set_ylabel('Count', fontsize=12)
+    ax2.set_title('(B) Distribution', fontweight='bold', fontsize=12)
+    ax2.legend(loc='upper left')
     
-    bins = np.linspace(df_results['Jaccard'].min() - 0.02, df_results['Jaccard'].max() + 0.02, 25)
-    
-    ax2.hist(ad_results['Jaccard'], bins=bins, alpha=0.6, color=COLORS['AD'], 
-             label=f'AD (n={len(ad_results)})', edgecolor='white', linewidth=1)
-    ax2.hist(hc_results['Jaccard'], bins=bins, alpha=0.6, color=COLORS['HC'], 
-             label=f'HC (n={len(hc_results)})', edgecolor='white', linewidth=1)
-    
-    ax2.axvline(ad_results['Jaccard'].mean(), color=COLORS['AD'], linestyle='--', 
-                linewidth=2.5, label=f'AD mean: {ad_results["Jaccard"].mean():.3f}')
-    ax2.axvline(hc_results['Jaccard'].mean(), color=COLORS['HC'], linestyle='--', 
-                linewidth=2.5, label=f'HC mean: {hc_results["Jaccard"].mean():.3f}')
-    
-    ax2.set_xlabel('Jaccard Similarity', fontsize=13)
-    ax2.set_ylabel('Count', fontsize=13)
-    ax2.set_title('B) Distribution', fontsize=14, fontweight='bold')
-    ax2.legend(loc='upper left', fontsize=10)
-    
-    # 3C: Shared Edges Histogram
+    # 3C: Shared edges histogram
     ax3 = fig.add_subplot(gs[0, 2])
+    bins = np.linspace(df['N_Shared'].min() - 20, df['N_Shared'].max() + 20, 20)
+    ax3.hist(ad_df['N_Shared'], bins=bins, alpha=0.6, color=COLORS['AD'], edgecolor='white')
+    ax3.hist(hc_df['N_Shared'], bins=bins, alpha=0.6, color=COLORS['HC'], edgecolor='white')
+    ax3.axvline(n_edges, color='black', ls='-', lw=3, label=f'Consensus: {n_edges:,}')
+    ax3.set_xlabel('Shared Edges', fontsize=12)
+    ax3.set_ylabel('Count', fontsize=12)
+    ax3.set_title('(C) Shared Edges Distribution', fontweight='bold', fontsize=12)
+    ax3.legend(loc='upper left')
     
-    bins = np.linspace(df_results['N_Shared_Edges'].min() - 20, 
-                       df_results['N_Shared_Edges'].max() + 20, 25)
-    
-    ax3.hist(ad_results['N_Shared_Edges'], bins=bins, alpha=0.6, color=COLORS['AD'], 
-             label=f'AD', edgecolor='white', linewidth=1)
-    ax3.hist(hc_results['N_Shared_Edges'], bins=bins, alpha=0.6, color=COLORS['HC'], 
-             label=f'HC', edgecolor='white', linewidth=1)
-    
-    ax3.axvline(consensus_n_edges, color='black', linestyle='-', linewidth=3, 
-                label=f'Consensus: {consensus_n_edges:,}')
-    ax3.axvline(ad_results['N_Shared_Edges'].mean(), color=COLORS['AD'], linestyle='--', linewidth=2)
-    ax3.axvline(hc_results['N_Shared_Edges'].mean(), color=COLORS['HC'], linestyle='--', linewidth=2)
-    
-    ax3.set_xlabel('Number of Shared Edges', fontsize=13)
-    ax3.set_ylabel('Count', fontsize=13)
-    ax3.set_title('C) Shared Edges Distribution', fontsize=14, fontweight='bold')
-    ax3.legend(loc='upper left', fontsize=10)
-    
-    # 3D: Individual subject bar chart
+    # 3D: All subjects ranked
     ax4 = fig.add_subplot(gs[1, :])
-    
-    df_sorted = df_results.sort_values('Jaccard', ascending=False).reset_index(drop=True)
-    colors_bar = [COLORS['AD'] if g == 'AD' else COLORS['HC'] for g in df_sorted['Group']]
-    
-    bars = ax4.bar(range(len(df_sorted)), df_sorted['Jaccard'], color=colors_bar, alpha=0.8, edgecolor='white')
-    
-    ax4.axhline(y=df_results['Jaccard'].mean(), color='black', linestyle='-', linewidth=2, 
-                label=f'Overall mean: {df_results["Jaccard"].mean():.3f}')
-    ax4.axhline(y=ad_results['Jaccard'].mean(), color=COLORS['AD'], linestyle='--', linewidth=2, 
-                label=f'AD mean: {ad_results["Jaccard"].mean():.3f}')
-    ax4.axhline(y=hc_results['Jaccard'].mean(), color=COLORS['HC'], linestyle='--', linewidth=2, 
-                label=f'HC mean: {hc_results["Jaccard"].mean():.3f}')
-    
-    ax4.set_xlabel('Subject Rank (by Jaccard)', fontsize=13)
-    ax4.set_ylabel('Jaccard Similarity', fontsize=13)
-    ax4.set_title('D) All Subjects Ranked by Jaccard Similarity', fontsize=14, fontweight='bold')
+    df_sorted = df.sort_values('Jaccard', ascending=False).reset_index(drop=True)
+    colors = [COLORS['AD'] if g == 'AD' else COLORS['HC'] for g in df_sorted['Group']]
+    ax4.bar(range(len(df_sorted)), df_sorted['Jaccard'], color=colors, alpha=0.8, edgecolor='white')
+    ax4.axhline(df['Jaccard'].mean(), color=COLORS['mean_line'], ls='-', lw=2,
+                label=f'Mean: {df["Jaccard"].mean():.3f}')
+    ax4.axhline(ad_df['Jaccard'].mean(), color=COLORS['AD'], ls='--', lw=2)
+    ax4.axhline(hc_df['Jaccard'].mean(), color=COLORS['HC'], ls='--', lw=2)
+    ax4.set_xlabel('Subject Rank', fontsize=12)
+    ax4.set_ylabel('Jaccard Similarity', fontsize=12)
+    ax4.set_title('(D) All Subjects Ranked by Jaccard Similarity', fontweight='bold', fontsize=12)
     ax4.set_xlim([-1, len(df_sorted)])
     
-    from matplotlib.patches import Patch
     legend_elements = [Patch(facecolor=COLORS['AD'], alpha=0.8, label='AD'),
                        Patch(facecolor=COLORS['HC'], alpha=0.8, label='HC')]
-    ax4.legend(handles=legend_elements + ax4.get_legend_handles_labels()[0], loc='upper right', fontsize=10)
+    ax4.legend(handles=legend_elements, loc='upper right')
     
-    plt.suptitle(f'Figure 3: Jaccard Similarity Analysis\n(Edge Overlap: J = |A∩B| / |A∪B|, measures if same connections exist)', 
-                 fontsize=16, fontweight='bold', y=0.98)
+    plt.suptitle('Figure 3: Jaccard Similarity Analysis\n(Binary Edge Overlap: J = |A∩B| / |A∪B|)', 
+                 fontsize=15, fontweight='bold', y=0.99)
     
-    stats_text = f"t = {t_stat:.3f}, p = {p_val:.4f}, Cohen's d = {d:.3f}"
-    fig.text(0.5, 0.01, stats_text, ha='center', fontsize=12, style='italic',
+    fig.text(0.5, 0.01, f't = {t_stat:.3f}, p = {p_val:.4f}, Cohen\'s d = {d:.3f}',
+             ha='center', fontsize=11, style='italic',
              bbox=dict(boxstyle='round', facecolor='lightyellow', alpha=0.8))
     
-    fig.savefig(output_folder / 'figure3_jaccard_analysis.png', dpi=300, bbox_inches='tight', facecolor='white')
-    plt.close(fig)
-    print(f"  ✓ Saved: figure3_jaccard_analysis.png")
+    plt.savefig(output_folder / 'figure3_jaccard_analysis.png', dpi=300, bbox_inches='tight', facecolor='white')
+    plt.close()
+    print("  ✓ figure3_jaccard_analysis.png")
 
 
-def create_figure4_combined_analysis(df_results, ad_results, hc_results, output_folder):
-    """
-    FIGURE 4: Combined Pearson & Jaccard Analysis
-    Shows relationship between both metrics
-    """
-    fig = plt.figure(figsize=(16, 12))
-    gs = gridspec.GridSpec(2, 2, figure=fig, hspace=0.3, wspace=0.3)
+def create_figure4(df, ad_df, hc_df, sparsity_info, n_edges, output_folder):
+    """Figure 4: Combined Summary (Publication Ready)"""
     
-    # 4A: Scatter plot Pearson vs Jaccard
-    ax1 = fig.add_subplot(gs[0, 0])
+    fig = plt.figure(figsize=(14, 12))
+    gs = gridspec.GridSpec(3, 3, figure=fig, hspace=0.4, wspace=0.35)
     
-    ax1.scatter(ad_results['Pearson_r'], ad_results['Jaccard'], 
-                c=COLORS['AD'], label=f'AD (n={len(ad_results)})', 
-                alpha=0.7, s=80, edgecolor='white', linewidth=1)
-    ax1.scatter(hc_results['Pearson_r'], hc_results['Jaccard'], 
-                c=COLORS['HC'], label=f'HC (n={len(hc_results)})', 
-                alpha=0.7, s=80, edgecolor='white', linewidth=1)
-    
-    # Add correlation
-    r_pj, p_pj = stats.pearsonr(df_results['Pearson_r'], df_results['Jaccard'])
-    
-    # Add trend line
-    z = np.polyfit(df_results['Pearson_r'], df_results['Jaccard'], 1)
-    p = np.poly1d(z)
-    x_line = np.linspace(df_results['Pearson_r'].min(), df_results['Pearson_r'].max(), 100)
-    ax1.plot(x_line, p(x_line), 'k--', alpha=0.5, linewidth=2, label=f'r = {r_pj:.3f}')
-    
-    ax1.set_xlabel('Pearson Correlation (r)', fontsize=13)
-    ax1.set_ylabel('Jaccard Similarity', fontsize=13)
-    ax1.set_title('A) Pearson vs Jaccard\n(Two Complementary Metrics)', fontsize=14, fontweight='bold')
-    ax1.legend(loc='lower right', fontsize=11)
-    
-    # 4B: Combined violin plots
-    ax2 = fig.add_subplot(gs[0, 1])
-    
-    positions = [1, 2, 4, 5]
-    data_violin = [ad_results['Pearson_r'], hc_results['Pearson_r'], 
-                   ad_results['Jaccard'], hc_results['Jaccard']]
-    
-    parts = ax2.violinplot(data_violin, positions=positions, showmeans=True, showmedians=True, widths=0.7)
-    
-    colors_violin = [COLORS['AD'], COLORS['HC'], COLORS['AD'], COLORS['HC']]
-    for i, pc in enumerate(parts['bodies']):
-        pc.set_facecolor(colors_violin[i])
-        pc.set_alpha(0.7)
-        pc.set_edgecolor('black')
-    
-    parts['cmeans'].set_color('black')
-    parts['cmeans'].set_linewidth(2)
-    parts['cmedians'].set_color('white')
-    
-    ax2.set_xticks([1.5, 4.5])
-    ax2.set_xticklabels(['Pearson r\n(Weight Similarity)', 'Jaccard\n(Edge Overlap)'], fontsize=12)
-    ax2.set_ylabel('Similarity Metric', fontsize=13)
-    ax2.set_title('B) Distribution Comparison\n(Red = AD, Blue = HC)', fontsize=14, fontweight='bold')
-    
-    # 4C: Paired bar chart comparing means
-    ax3 = fig.add_subplot(gs[1, 0])
-    
-    x = np.arange(2)
-    width = 0.35
-    
-    ad_means = [ad_results['Pearson_r'].mean(), ad_results['Jaccard'].mean()]
-    hc_means = [hc_results['Pearson_r'].mean(), hc_results['Jaccard'].mean()]
-    ad_stds = [ad_results['Pearson_r'].std(), ad_results['Jaccard'].std()]
-    hc_stds = [hc_results['Pearson_r'].std(), hc_results['Jaccard'].std()]
-    
-    bars1 = ax3.bar(x - width/2, ad_means, width, yerr=ad_stds, label='AD', 
-                    color=COLORS['AD'], alpha=0.8, capsize=5, edgecolor='white')
-    bars2 = ax3.bar(x + width/2, hc_means, width, yerr=hc_stds, label='HC', 
-                    color=COLORS['HC'], alpha=0.8, capsize=5, edgecolor='white')
-    
-    ax3.set_xticks(x)
-    ax3.set_xticklabels(['Pearson r', 'Jaccard'], fontsize=12)
-    ax3.set_ylabel('Mean ± SD', fontsize=13)
-    ax3.set_title('C) Group Means Comparison', fontsize=14, fontweight='bold')
-    ax3.legend(loc='upper right', fontsize=11)
-    
-    # Add significance stars
-    t_p, p_p = stats.ttest_ind(ad_results['Pearson_r'], hc_results['Pearson_r'])
-    t_j, p_j = stats.ttest_ind(ad_results['Jaccard'], hc_results['Jaccard'])
-    
-    for i, (p_val, y_max) in enumerate([(p_p, max(ad_means[0]+ad_stds[0], hc_means[0]+hc_stds[0])),
-                                         (p_j, max(ad_means[1]+ad_stds[1], hc_means[1]+hc_stds[1]))]):
-        sig = '***' if p_val < 0.001 else '**' if p_val < 0.01 else '*' if p_val < 0.05 else 'ns'
-        ax3.text(i, y_max + 0.02, sig, ha='center', fontsize=14, fontweight='bold')
-    
-    # 4D: Summary text box
-    ax4 = fig.add_subplot(gs[1, 1])
-    ax4.axis('off')
-    
-    d_p = cohens_d(ad_results['Pearson_r'], hc_results['Pearson_r'])
-    d_j = cohens_d(ad_results['Jaccard'], hc_results['Jaccard'])
-    
-    summary_text = f"""
-    ╔══════════════════════════════════════════════════════════════╗
-    ║               SIMILARITY METRICS SUMMARY                     ║
-    ╠══════════════════════════════════════════════════════════════╣
-    ║                                                              ║
-    ║  PEARSON CORRELATION (r)                                     ║
-    ║  ─────────────────────────────────────────────────────────   ║
-    ║  Measures: Weight similarity (connection strengths)          ║
-    ║  Formula:  r = Σ(x-x̄)(y-ȳ) / [√Σ(x-x̄)² × √Σ(y-ȳ)²]         ║
-    ║                                                              ║
-    ║    AD:     {ad_results['Pearson_r'].mean():.3f} ± {ad_results['Pearson_r'].std():.3f}                                   ║
-    ║    HC:     {hc_results['Pearson_r'].mean():.3f} ± {hc_results['Pearson_r'].std():.3f}                                   ║
-    ║    p-value: {p_p:.4f}   Cohen's d: {d_p:.3f}                      ║
-    ║                                                              ║
-    ╠══════════════════════════════════════════════════════════════╣
-    ║                                                              ║
-    ║  JACCARD SIMILARITY                                          ║
-    ║  ─────────────────────────────────────────────────────────   ║
-    ║  Measures: Binary edge overlap (same connections?)           ║
-    ║  Formula:  J = |A ∩ B| / |A ∪ B|                             ║
-    ║                                                              ║
-    ║    AD:     {ad_results['Jaccard'].mean():.3f} ± {ad_results['Jaccard'].std():.3f}                                   ║
-    ║    HC:     {hc_results['Jaccard'].mean():.3f} ± {hc_results['Jaccard'].std():.3f}                                   ║
-    ║    p-value: {p_j:.4f}   Cohen's d: {d_j:.3f}                      ║
-    ║                                                              ║
-    ╠══════════════════════════════════════════════════════════════╣
-    ║  Correlation between metrics: r = {r_pj:.3f}                      ║
-    ╚══════════════════════════════════════════════════════════════╝
-    """
-    
-    ax4.text(0.05, 0.95, summary_text, transform=ax4.transAxes,
-             fontsize=11, verticalalignment='top', fontfamily='monospace',
-             bbox=dict(boxstyle='round,pad=0.5', facecolor='lightyellow', alpha=0.9, edgecolor='orange'))
-    ax4.set_title('D) Statistical Summary', fontsize=14, fontweight='bold')
-    
-    plt.suptitle('Figure 4: Combined Pearson & Jaccard Analysis', fontsize=16, fontweight='bold', y=0.98)
-    
-    fig.savefig(output_folder / 'figure4_combined_analysis.png', dpi=300, bbox_inches='tight', facecolor='white')
-    plt.close(fig)
-    print(f"  ✓ Saved: figure4_combined_analysis.png")
-
-
-def create_figure5_subject_ranking(df_results, output_folder):
-    """
-    FIGURE 5: All Subjects Ranked
-    Side-by-side comparison of both metrics for all subjects
-    """
-    fig = plt.figure(figsize=(18, 10))
-    
-    n_subjects = len(df_results)
-    
-    # Sort by combined score
-    df_sorted = df_results.sort_values('Pearson_r', ascending=False).reset_index(drop=True)
-    
-    # Create subplot
-    ax = fig.add_subplot(111)
-    
-    x = np.arange(n_subjects)
-    width = 0.4
-    
-    # Bars for Pearson
-    colors_p = [COLORS['AD'] if g == 'AD' else COLORS['HC'] for g in df_sorted['Group']]
-    bars1 = ax.bar(x - width/2, df_sorted['Pearson_r'], width, 
-                   color=colors_p, alpha=0.8, label='Pearson r', edgecolor='white')
-    
-    # Bars for Jaccard (reordered by same index)
-    bars2 = ax.bar(x + width/2, df_sorted['Jaccard'], width, 
-                   color=colors_p, alpha=0.4, label='Jaccard', edgecolor='white', hatch='///')
-    
-    # Mean lines
-    ax.axhline(y=df_results['Pearson_r'].mean(), color=COLORS['pearson'], linestyle='-', 
-               linewidth=2.5, label=f'Pearson mean: {df_results["Pearson_r"].mean():.3f}')
-    ax.axhline(y=df_results['Jaccard'].mean(), color=COLORS['jaccard'], linestyle='--', 
-               linewidth=2.5, label=f'Jaccard mean: {df_results["Jaccard"].mean():.3f}')
-    
-    ax.set_xlabel('Subject Rank (by Pearson r)', fontsize=14)
-    ax.set_ylabel('Similarity Metric', fontsize=14)
-    ax.set_title('Figure 5: All Subjects - Pearson (solid) vs Jaccard (hatched)\nColors: Red = AD, Blue = HC', 
-                 fontsize=16, fontweight='bold')
-    ax.set_xlim([-1, n_subjects])
-    
-    # Custom legend
-    from matplotlib.patches import Patch
-    legend_elements = [
-        Patch(facecolor=COLORS['AD'], alpha=0.8, label='AD - Pearson'),
-        Patch(facecolor=COLORS['HC'], alpha=0.8, label='HC - Pearson'),
-        Patch(facecolor=COLORS['AD'], alpha=0.4, hatch='///', label='AD - Jaccard'),
-        Patch(facecolor=COLORS['HC'], alpha=0.4, hatch='///', label='HC - Jaccard'),
-    ]
-    ax.legend(handles=legend_elements, loc='upper right', fontsize=11, ncol=2)
-    
-    plt.tight_layout()
-    fig.savefig(output_folder / 'figure5_subject_ranking.png', dpi=300, bbox_inches='tight', facecolor='white')
-    plt.close(fig)
-    print(f"  ✓ Saved: figure5_subject_ranking.png")
-
-
-def create_figure6_summary(df_results, ad_results, hc_results, sparsity_info, consensus_n_edges, output_folder):
-    """
-    FIGURE 6: Publication-Ready Summary Figure
-    Compact summary with key results
-    """
-    fig = plt.figure(figsize=(14, 10))
-    gs = gridspec.GridSpec(2, 3, figure=fig, hspace=0.4, wspace=0.35)
-    
-    n_ad = len(ad_results)
-    n_hc = len(hc_results)
-    
-    # Statistical tests
-    t_p, p_p = stats.ttest_ind(ad_results['Pearson_r'], hc_results['Pearson_r'])
-    t_j, p_j = stats.ttest_ind(ad_results['Jaccard'], hc_results['Jaccard'])
-    d_p = cohens_d(ad_results['Pearson_r'], hc_results['Pearson_r'])
-    d_j = cohens_d(ad_results['Jaccard'], hc_results['Jaccard'])
-    
+    # Stats
+    t_p, p_p = stats.ttest_ind(ad_df['Pearson_r'], hc_df['Pearson_r'])
+    t_j, p_j = stats.ttest_ind(ad_df['Jaccard'], hc_df['Jaccard'])
+    d_p = cohens_d(ad_df['Pearson_r'], hc_df['Pearson_r'])
+    d_j = cohens_d(ad_df['Jaccard'], hc_df['Jaccard'])
     sig_p = '***' if p_p < 0.001 else '**' if p_p < 0.01 else '*' if p_p < 0.05 else 'ns'
     sig_j = '***' if p_j < 0.001 else '**' if p_j < 0.01 else '*' if p_j < 0.05 else 'ns'
     
-    # 6A: Pearson boxplot
+    n_ad, n_hc = len(ad_df), len(hc_df)
+    
+    # 4A: Pearson boxplot
     ax1 = fig.add_subplot(gs[0, 0])
-    bp1 = ax1.boxplot([ad_results['Pearson_r'], hc_results['Pearson_r']], 
-                      labels=['AD', 'HC'], patch_artist=True, widths=0.6)
+    bp1 = ax1.boxplot([ad_df['Pearson_r'], hc_df['Pearson_r']], labels=['AD', 'HC'],
+                      patch_artist=True, widths=0.6)
     bp1['boxes'][0].set_facecolor(COLORS['AD'])
     bp1['boxes'][1].set_facecolor(COLORS['HC'])
     for box in bp1['boxes']:
         box.set_alpha(0.7)
+    for i, (data, color) in enumerate([(ad_df['Pearson_r'], COLORS['AD']), 
+                                        (hc_df['Pearson_r'], COLORS['HC'])]):
+        x = np.random.normal(i+1, 0.05, size=len(data))
+        ax1.scatter(x, data, alpha=0.5, color=color, s=35, edgecolor='white', zorder=3)
+    y_max = max(ad_df['Pearson_r'].max(), hc_df['Pearson_r'].max())
+    ax1.plot([1, 2], [y_max + 0.015, y_max + 0.015], 'k-', lw=1.5)
+    ax1.text(1.5, y_max + 0.02, sig_p, ha='center', fontsize=13, fontweight='bold')
+    ax1.set_ylabel('Pearson r', fontsize=12)
+    ax1.set_title(f'(A) Pearson Correlation\np = {p_p:.4f}', fontweight='bold')
     
-    for i, (data, color) in enumerate([(ad_results['Pearson_r'], COLORS['AD']), 
-                                        (hc_results['Pearson_r'], COLORS['HC'])]):
-        x = np.random.normal(i+1, 0.06, size=len(data))
-        ax1.scatter(x, data, alpha=0.6, color=color, s=40, edgecolor='white', zorder=3)
-    
-    y_max = max(ad_results['Pearson_r'].max(), hc_results['Pearson_r'].max())
-    ax1.plot([1, 2], [y_max + 0.015, y_max + 0.015], 'k-', linewidth=1.5)
-    ax1.text(1.5, y_max + 0.02, sig_p, ha='center', fontsize=14, fontweight='bold')
-    
-    ax1.set_ylabel('Pearson r', fontsize=13)
-    ax1.set_title(f'A) Pearson Correlation\np = {p_p:.4f}, d = {d_p:.2f}', fontsize=13, fontweight='bold')
-    
-    # 6B: Jaccard boxplot
+    # 4B: Jaccard boxplot
     ax2 = fig.add_subplot(gs[0, 1])
-    bp2 = ax2.boxplot([ad_results['Jaccard'], hc_results['Jaccard']], 
-                      labels=['AD', 'HC'], patch_artist=True, widths=0.6)
+    bp2 = ax2.boxplot([ad_df['Jaccard'], hc_df['Jaccard']], labels=['AD', 'HC'],
+                      patch_artist=True, widths=0.6)
     bp2['boxes'][0].set_facecolor(COLORS['AD'])
     bp2['boxes'][1].set_facecolor(COLORS['HC'])
     for box in bp2['boxes']:
         box.set_alpha(0.7)
+    for i, (data, color) in enumerate([(ad_df['Jaccard'], COLORS['AD']), 
+                                        (hc_df['Jaccard'], COLORS['HC'])]):
+        x = np.random.normal(i+1, 0.05, size=len(data))
+        ax2.scatter(x, data, alpha=0.5, color=color, s=35, edgecolor='white', zorder=3)
+    y_max = max(ad_df['Jaccard'].max(), hc_df['Jaccard'].max())
+    ax2.plot([1, 2], [y_max + 0.015, y_max + 0.015], 'k-', lw=1.5)
+    ax2.text(1.5, y_max + 0.02, sig_j, ha='center', fontsize=13, fontweight='bold')
+    ax2.set_ylabel('Jaccard', fontsize=12)
+    ax2.set_title(f'(B) Jaccard Similarity\np = {p_j:.4f}', fontweight='bold')
     
-    for i, (data, color) in enumerate([(ad_results['Jaccard'], COLORS['AD']), 
-                                        (hc_results['Jaccard'], COLORS['HC'])]):
-        x = np.random.normal(i+1, 0.06, size=len(data))
-        ax2.scatter(x, data, alpha=0.6, color=color, s=40, edgecolor='white', zorder=3)
-    
-    y_max = max(ad_results['Jaccard'].max(), hc_results['Jaccard'].max())
-    ax2.plot([1, 2], [y_max + 0.015, y_max + 0.015], 'k-', linewidth=1.5)
-    ax2.text(1.5, y_max + 0.02, sig_j, ha='center', fontsize=14, fontweight='bold')
-    
-    ax2.set_ylabel('Jaccard', fontsize=13)
-    ax2.set_title(f'B) Jaccard Similarity\np = {p_j:.4f}, d = {d_j:.2f}', fontsize=13, fontweight='bold')
-    
-    # 6C: Scatter plot
+    # 4C: Scatter Pearson vs Jaccard
     ax3 = fig.add_subplot(gs[0, 2])
-    ax3.scatter(ad_results['Pearson_r'], ad_results['Jaccard'], 
-                c=COLORS['AD'], label=f'AD (n={n_ad})', alpha=0.7, s=60, edgecolor='white')
-    ax3.scatter(hc_results['Pearson_r'], hc_results['Jaccard'], 
-                c=COLORS['HC'], label=f'HC (n={n_hc})', alpha=0.7, s=60, edgecolor='white')
+    ax3.scatter(ad_df['Pearson_r'], ad_df['Jaccard'], c=COLORS['AD'], 
+                label=f'AD (n={n_ad})', alpha=0.7, s=50, edgecolor='white')
+    ax3.scatter(hc_df['Pearson_r'], hc_df['Jaccard'], c=COLORS['HC'], 
+                label=f'HC (n={n_hc})', alpha=0.7, s=50, edgecolor='white')
+    r_pj, _ = stats.pearsonr(df['Pearson_r'], df['Jaccard'])
+    ax3.set_xlabel('Pearson r', fontsize=12)
+    ax3.set_ylabel('Jaccard', fontsize=12)
+    ax3.set_title(f'(C) Metrics Correlation\nr = {r_pj:.3f}', fontweight='bold')
+    ax3.legend(loc='lower right')
     
-    r_pj, _ = stats.pearsonr(df_results['Pearson_r'], df_results['Jaccard'])
-    ax3.set_xlabel('Pearson r', fontsize=13)
-    ax3.set_ylabel('Jaccard', fontsize=13)
-    ax3.set_title(f'C) Metrics Correlation\nr = {r_pj:.3f}', fontsize=13, fontweight='bold')
-    ax3.legend(loc='lower right', fontsize=10)
+    # 4D: Violin comparison
+    ax4 = fig.add_subplot(gs[1, 0])
+    positions = [1, 2, 4, 5]
+    data_v = [ad_df['Pearson_r'], hc_df['Pearson_r'], ad_df['Jaccard'], hc_df['Jaccard']]
+    parts = ax4.violinplot(data_v, positions=positions, showmeans=True, showmedians=True, widths=0.7)
+    colors_v = [COLORS['AD'], COLORS['HC'], COLORS['AD'], COLORS['HC']]
+    for i, pc in enumerate(parts['bodies']):
+        pc.set_facecolor(colors_v[i])
+        pc.set_alpha(0.7)
+    ax4.set_xticks([1.5, 4.5])
+    ax4.set_xticklabels(['Pearson r', 'Jaccard'])
+    ax4.set_ylabel('Value', fontsize=12)
+    ax4.set_title('(D) Distribution Comparison', fontweight='bold')
     
-    # 6D-F: Summary table
-    ax4 = fig.add_subplot(gs[1, :])
-    ax4.axis('off')
+    # 4E: Bar chart means
+    ax5 = fig.add_subplot(gs[1, 1])
+    x = np.arange(2)
+    width = 0.35
+    ad_means = [ad_df['Pearson_r'].mean(), ad_df['Jaccard'].mean()]
+    hc_means = [hc_df['Pearson_r'].mean(), hc_df['Jaccard'].mean()]
+    ad_stds = [ad_df['Pearson_r'].std(), ad_df['Jaccard'].std()]
+    hc_stds = [hc_df['Pearson_r'].std(), hc_df['Jaccard'].std()]
+    ax5.bar(x - width/2, ad_means, width, yerr=ad_stds, label='AD', 
+            color=COLORS['AD'], alpha=0.8, capsize=5)
+    ax5.bar(x + width/2, hc_means, width, yerr=hc_stds, label='HC', 
+            color=COLORS['HC'], alpha=0.8, capsize=5)
+    ax5.set_xticks(x)
+    ax5.set_xticklabels(['Pearson r', 'Jaccard'])
+    ax5.set_ylabel('Mean ± SD', fontsize=12)
+    ax5.set_title('(E) Group Means', fontweight='bold')
+    ax5.legend()
     
-    summary_table = f"""
-    ╔═══════════════════════════════════════════════════════════════════════════════════════════════════════════════╗
-    ║                                    SUBJECT vs CONSENSUS COMPARISON SUMMARY                                     ║
-    ╠═══════════════════════════════════════════════════════════════════════════════════════════════════════════════╣
-    ║                                                                                                               ║
-    ║   CONSENSUS MATRIX                                                                                            ║
-    ║   ────────────────────────────────────────────────────────────────────────────────────────────────────────    ║
-    ║   Edges: {consensus_n_edges:,} / {sparsity_info['total_possible_edges']:,} ({sparsity_info['density']*100:.2f}% density)                                                                ║
-    ║   Method: Distance-dependent selection with natural sparsity                                                  ║
-    ║   Density Matching: Each subject thresholded to keep TOP {consensus_n_edges:,} edges                                           ║
-    ║                                                                                                               ║
-    ╠═══════════════════════════════════════════════════════════════════════════════════════════════════════════════╣
-    ║                                                                                                               ║
-    ║   SIMILARITY METRICS                        AD (n={n_ad})                 HC (n={n_hc})                 Statistics       ║
-    ║   ─────────────────────────────────────────────────────────────────────────────────────────────────────────   ║
-    ║   Pearson r (weight similarity)       {ad_results['Pearson_r'].mean():.3f} ± {ad_results['Pearson_r'].std():.3f}            {hc_results['Pearson_r'].mean():.3f} ± {hc_results['Pearson_r'].std():.3f}            p={p_p:.4f} {sig_p}    ║
-    ║   Jaccard (edge overlap)              {ad_results['Jaccard'].mean():.3f} ± {ad_results['Jaccard'].std():.3f}            {hc_results['Jaccard'].mean():.3f} ± {hc_results['Jaccard'].std():.3f}            p={p_j:.4f} {sig_j}    ║
-    ║   Shared Edges (mean)                 {ad_results['N_Shared_Edges'].mean():.0f}                      {hc_results['N_Shared_Edges'].mean():.0f}                                        ║
-    ║                                                                                                               ║
-    ╠═══════════════════════════════════════════════════════════════════════════════════════════════════════════════╣
-    ║                                                                                                               ║
-    ║   INTERPRETATION                                                                                              ║
-    ║   ─────────────────────────────────────────────────────────────────────────────────────────────────────────   ║
-    ║   • Pearson r: Measures how similar CONNECTION STRENGTHS are to the consensus                                ║
-    ║   • Jaccard: Measures if the SAME CONNECTIONS are present (binary overlap)                                   ║
-    ║   • Both metrics are complementary: Pearson focuses on weights, Jaccard on topology                          ║
-    ║                                                                                                               ║
-    ╚═══════════════════════════════════════════════════════════════════════════════════════════════════════════════╝
-    """
+    # Significance stars
+    for i, (pv, ym) in enumerate([(p_p, max(ad_means[0]+ad_stds[0], hc_means[0]+hc_stds[0])),
+                                   (p_j, max(ad_means[1]+ad_stds[1], hc_means[1]+hc_stds[1]))]):
+        s = '***' if pv < 0.001 else '**' if pv < 0.01 else '*' if pv < 0.05 else 'ns'
+        ax5.text(i, ym + 0.02, s, ha='center', fontsize=12, fontweight='bold')
     
-    ax4.text(0.5, 0.5, summary_table, transform=ax4.transAxes,
-             fontsize=10, verticalalignment='center', horizontalalignment='center',
-             fontfamily='monospace',
-             bbox=dict(boxstyle='round,pad=0.5', facecolor='white', alpha=0.95, edgecolor='gray'))
+    # 4F: Shared edges
+    ax6 = fig.add_subplot(gs[1, 2])
+    bins = np.linspace(df['N_Shared'].min() - 10, df['N_Shared'].max() + 10, 15)
+    ax6.hist(ad_df['N_Shared'], bins=bins, alpha=0.6, color=COLORS['AD'], 
+             label=f'AD (μ={ad_df["N_Shared"].mean():.0f})', edgecolor='white')
+    ax6.hist(hc_df['N_Shared'], bins=bins, alpha=0.6, color=COLORS['HC'], 
+             label=f'HC (μ={hc_df["N_Shared"].mean():.0f})', edgecolor='white')
+    ax6.axvline(n_edges, color='black', ls='-', lw=2.5, label=f'Consensus: {n_edges:,}')
+    ax6.set_xlabel('Shared Edges', fontsize=12)
+    ax6.set_ylabel('Count', fontsize=12)
+    ax6.set_title('(F) Shared Edges', fontweight='bold')
+    ax6.legend(fontsize=9)
     
-    plt.suptitle('Figure 6: Summary - Subject vs Consensus Similarity', fontsize=16, fontweight='bold', y=0.98)
+    # 4G: Summary table
+    ax7 = fig.add_subplot(gs[2, :])
+    ax7.axis('off')
     
-    fig.savefig(output_folder / 'figure6_summary.png', dpi=300, bbox_inches='tight', facecolor='white')
-    plt.close(fig)
-    print(f"  ✓ Saved: figure6_summary.png")
+    summary = f"""
+╔══════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════╗
+║                                    SUBJECT vs CONSENSUS: SUMMARY STATISTICS                                              ║
+╠══════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════╣
+║                                                                                                                          ║
+║   CONSENSUS: {n_edges:,} edges ({sparsity_info['density']*100:.1f}% density)  |  SUBJECTS: {len(df)} total ({n_ad} AD + {n_hc} HC)                                     ║
+║   Method: Distance-dependent consensus with natural sparsity  |  Density Matching: Top {n_edges:,} edges per subject                ║
+║                                                                                                                          ║
+╠═══════════════════════════════════════════════╦══════════════════════════════════════════════════════════════════════════╣
+║   PEARSON CORRELATION (Weight Similarity)     ║   JACCARD SIMILARITY (Binary Edge Overlap)                              ║
+╠═══════════════════════════════════════════════╬══════════════════════════════════════════════════════════════════════════╣
+║   AD:  {ad_df['Pearson_r'].mean():.3f} ± {ad_df['Pearson_r'].std():.3f}                              ║   AD:  {ad_df['Jaccard'].mean():.3f} ± {ad_df['Jaccard'].std():.3f}    (Shared: {ad_df['N_Shared'].mean():.0f} edges)                       ║
+║   HC:  {hc_df['Pearson_r'].mean():.3f} ± {hc_df['Pearson_r'].std():.3f}                              ║   HC:  {hc_df['Jaccard'].mean():.3f} ± {hc_df['Jaccard'].std():.3f}    (Shared: {hc_df['N_Shared'].mean():.0f} edges)                       ║
+║   p = {p_p:.4f} {sig_p}  |  Cohen's d = {d_p:.3f}           ║   p = {p_j:.4f} {sig_j}  |  Cohen's d = {d_j:.3f}                                           ║
+╠═══════════════════════════════════════════════╩══════════════════════════════════════════════════════════════════════════╣
+║   INTERPRETATION:                                                                                                        ║
+║   • Pearson r: Measures how similar CONNECTION STRENGTHS are to the group consensus                                     ║
+║   • Jaccard:   Measures if the SAME CONNECTIONS are present (binary edge overlap after density matching)               ║
+║   • Both metrics are complementary: Pearson focuses on weights, Jaccard on topology                                    ║
+╚══════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════╝
+"""
+    ax7.text(0.5, 0.5, summary, transform=ax7.transAxes, fontsize=9.5,
+             ha='center', va='center', fontfamily='monospace',
+             bbox=dict(boxstyle='round', facecolor='white', edgecolor='gray', alpha=0.95))
+    
+    plt.suptitle('Figure 4: Combined Summary - Pearson Correlation + Jaccard Similarity', 
+                 fontsize=15, fontweight='bold', y=0.98)
+    
+    plt.savefig(output_folder / 'figure4_combined_summary.png', dpi=300, bbox_inches='tight', facecolor='white')
+    plt.close()
+    print("  ✓ figure4_combined_summary.png")
 
 
 # =============================================================================
-# MAIN ANALYSIS
+# MAIN
 # =============================================================================
 
 def main():
-    """Main function to compute each subject's similarity to saved consensus."""
-    
     # Create output folder
-    print("\n" + "="*70)
-    print("STEP 0: CREATING OUTPUT FOLDER")
-    print("="*70)
+    output_folder = Path(OUTPUT_FOLDER)
+    output_folder.mkdir(parents=True, exist_ok=True)
+    print(f"\n✓ Output folder: {output_folder.absolute()}")
     
-    output_folder = create_output_folder(OUTPUT_FOLDER)
-    print(f"✓ Output folder: {output_folder.absolute()}")
+    # Load consensus
+    print("\n" + "="*50)
+    print("LOADING CONSENSUS MATRIX")
+    print("="*50)
     
-    # Load consensus matrix
-    print("\n" + "="*70)
-    print("STEP 1: LOADING CONSENSUS MATRIX")
-    print("="*70)
-    
-    consensus_path = Path(CONSENSUS_MATRIX_PATH)
-    
-    if consensus_path.exists():
-        print(f"✓ Loading: {CONSENSUS_MATRIX_PATH}")
-        consensus_matrix = np.load(CONSENSUS_MATRIX_PATH)
+    if Path(CONSENSUS_MATRIX_PATH).exists():
+        consensus = np.load(CONSENSUS_MATRIX_PATH)
         use_synthetic = False
+        print(f"✓ Loaded: {CONSENSUS_MATRIX_PATH}")
     else:
-        print(f"✗ Not found: {CONSENSUS_MATRIX_PATH}")
-        print("  Using synthetic consensus...")
+        print(f"✗ Not found, using synthetic data")
         use_synthetic = True
-        
         np.random.seed(42)
-        n_channels = 128
-        base = np.zeros((n_channels, n_channels))
-        for i in range(n_channels):
-            for j in range(i+1, n_channels):
-                distance = abs(i - j)
-                if distance < 20:
-                    prob = 0.6 * np.exp(-distance / 10)
-                else:
-                    prob = 0.05
+        n = 128
+        consensus = np.zeros((n, n))
+        for i in range(n):
+            for j in range(i+1, n):
+                d = abs(i - j)
+                prob = 0.6 * np.exp(-d/10) if d < 20 else 0.05
                 if np.random.rand() < prob:
-                    weight = np.random.rand() * 0.5 + 0.1
-                    base[i, j] = weight
-                    base[j, i] = weight
-        consensus_matrix = base
+                    w = np.random.rand() * 0.5 + 0.1
+                    consensus[i, j] = consensus[j, i] = w
     
-    n_channels = consensus_matrix.shape[0]
-    print(f"  • Shape: {consensus_matrix.shape}")
+    n_channels = consensus.shape[0]
+    sparsity_info = calculate_sparsity(consensus)
+    n_edges = sparsity_info['n_edges']
     
-    # Calculate sparsity
-    print("\n" + "="*70)
-    print("STEP 2: ANALYZING CONSENSUS SPARSITY")
-    print("="*70)
+    print(f"  Shape: {consensus.shape}")
+    print(f"  Edges: {n_edges:,} / {sparsity_info['total_possible_edges']:,}")
+    print(f"  Density: {sparsity_info['density']*100:.2f}%")
     
-    sparsity_info = calculate_sparsity(consensus_matrix, threshold=0)
-    consensus_n_edges = sparsity_info['n_edges']
-    consensus_density = sparsity_info['density']
+    # Save consensus and sparsity info
+    np.save(output_folder / 'consensus_matrix.npy', consensus)
+    with open(output_folder / 'sparsity_info.txt', 'w') as f:
+        for k, v in sparsity_info.items():
+            f.write(f"{k}: {v}\n")
     
-    print(f"  • Edges: {consensus_n_edges:,} / {sparsity_info['total_possible_edges']:,}")
-    print(f"  • Density: {consensus_density*100:.2f}%")
+    # Load subjects
+    print("\n" + "="*50)
+    print("LOADING SUBJECTS")
+    print("="*50)
     
-    # Save sparsity info
-    sparsity_file = output_folder / "sparsity_info.txt"
-    with open(sparsity_file, 'w') as f:
-        f.write("CONSENSUS MATRIX SPARSITY\n")
-        f.write("="*40 + "\n\n")
-        for key, val in sparsity_info.items():
-            f.write(f"{key}: {val}\n")
+    all_matrices, subject_ids, group_labels = [], [], []
     
-    np.save(output_folder / "consensus_matrix.npy", consensus_matrix)
+    real_files = any(Path(f).exists() for f in AD_FILES + HC_FILES)
     
-    # Load subject data
-    print("\n" + "="*70)
-    print("STEP 3: LOADING SUBJECT DATA")
-    print("="*70)
-    
-    all_matrices = []
-    subject_ids = []
-    group_labels = []
-    
-    real_files_exist = any(Path(f).exists() for f in AD_FILES + HC_FILES)
-    
-    if real_files_exist and not use_synthetic:
-        for filepath in AD_FILES:
-            if Path(filepath).exists():
-                data = load_eeg_data(filepath)
+    if real_files and not use_synthetic:
+        for f in AD_FILES:
+            if Path(f).exists():
+                data = load_eeg_data(f)
                 if data is not None:
-                    corr_matrix = compute_correlation_matrix(data)
-                    if corr_matrix.shape[0] == n_channels:
-                        all_matrices.append(corr_matrix)
-                        subject_ids.append(extract_subject_id(filepath))
+                    m = compute_correlation_matrix(data)
+                    if m.shape[0] == n_channels:
+                        all_matrices.append(m)
+                        subject_ids.append(extract_subject_id(f))
                         group_labels.append('AD')
         
-        for filepath in HC_FILES:
-            if Path(filepath).exists():
-                data = load_eeg_data(filepath)
+        for f in HC_FILES:
+            if Path(f).exists():
+                data = load_eeg_data(f)
                 if data is not None:
-                    corr_matrix = compute_correlation_matrix(data)
-                    if corr_matrix.shape[0] == n_channels:
-                        all_matrices.append(corr_matrix)
-                        subject_ids.append(extract_subject_id(filepath))
+                    m = compute_correlation_matrix(data)
+                    if m.shape[0] == n_channels:
+                        all_matrices.append(m)
+                        subject_ids.append(extract_subject_id(f))
                         group_labels.append('HC')
     
     if len(all_matrices) == 0:
-        print("  Using synthetic subject data...")
+        print("  Using synthetic subjects...")
         np.random.seed(42)
-        
-        ad_mod = np.zeros((n_channels, n_channels))
-        ad_mod[:50, :50] = 0.15
-        ad_mod = (ad_mod + ad_mod.T) / 2
-        
-        hc_mod = np.zeros((n_channels, n_channels))
-        hc_mod[40:80, 40:80] = 0.1
-        hc_mod = (hc_mod + hc_mod.T) / 2
-        
-        base_pattern = np.random.rand(n_channels, n_channels) * 0.3
-        base_pattern = (base_pattern + base_pattern.T) / 2
-        np.fill_diagonal(base_pattern, 0)
+        base = np.random.rand(n_channels, n_channels) * 0.3
+        base = (base + base.T) / 2
+        np.fill_diagonal(base, 0)
         
         for i in range(35):
-            noise = np.random.randn(n_channels, n_channels) * 0.08
-            noise = (noise + noise.T) / 2
-            subj = np.clip(base_pattern + ad_mod + noise, 0, 1)
-            np.fill_diagonal(subj, 0)
-            all_matrices.append(subj)
+            m = np.clip(base + np.random.randn(n_channels, n_channels) * 0.08, 0, 1)
+            m = (m + m.T) / 2
+            np.fill_diagonal(m, 0)
+            all_matrices.append(m)
             subject_ids.append(f'sub-300{i+1:02d}')
             group_labels.append('AD')
         
         for i in range(31):
-            noise = np.random.randn(n_channels, n_channels) * 0.08
-            noise = (noise + noise.T) / 2
-            subj = np.clip(base_pattern + hc_mod + noise, 0, 1)
-            np.fill_diagonal(subj, 0)
-            all_matrices.append(subj)
+            m = np.clip(base + np.random.randn(n_channels, n_channels) * 0.08, 0, 1)
+            m = (m + m.T) / 2
+            np.fill_diagonal(m, 0)
+            all_matrices.append(m)
             subject_ids.append(f'sub-100{i+1:02d}')
             group_labels.append('HC')
     
-    n_subjects = len(all_matrices)
     n_ad = sum(1 for g in group_labels if g == 'AD')
     n_hc = sum(1 for g in group_labels if g == 'HC')
-    print(f"  • Total: {n_subjects} ({n_ad} AD + {n_hc} HC)")
+    print(f"  Total: {len(all_matrices)} ({n_ad} AD + {n_hc} HC)")
     
-    # Compare subjects to consensus
-    print("\n" + "="*70)
-    print("STEP 4: COMPUTING SIMILARITY METRICS")
-    print("="*70)
+    # Compare subjects
+    print("\n" + "="*50)
+    print("COMPUTING SIMILARITY METRICS")
+    print("="*50)
     
-    results_list = []
-    for i, (matrix, subj_id, group) in enumerate(zip(all_matrices, subject_ids, group_labels)):
-        comparison = compare_to_consensus_density_matched(matrix, consensus_matrix, consensus_n_edges)
-        results_list.append({
-            'Subject_ID': subj_id,
-            'Group': group,
-            **comparison
-        })
+    results = []
+    for i, (m, sid, g) in enumerate(zip(all_matrices, subject_ids, group_labels)):
+        comp = compare_to_consensus(m, consensus, n_edges)
+        results.append({'Subject_ID': sid, 'Group': g, **comp})
         if (i + 1) % 20 == 0:
-            print(f"  Processed {i + 1}/{n_subjects}...")
+            print(f"  Processed {i+1}/{len(all_matrices)}")
     
-    df_results = pd.DataFrame(results_list)
-    df_results = df_results.sort_values('Pearson_r', ascending=False).reset_index(drop=True)
-    df_results['Rank'] = range(1, len(df_results) + 1)
+    df = pd.DataFrame(results)
+    df = df.sort_values('Pearson_r', ascending=False).reset_index(drop=True)
+    df['Rank'] = range(1, len(df) + 1)
     
     # Save CSV
-    csv_file = output_folder / 'subject_vs_saved_consensus.csv'
-    df_results.to_csv(csv_file, index=False)
-    print(f"  ✓ Saved: {csv_file}")
+    df.to_csv(output_folder / 'subject_vs_saved_consensus.csv', index=False)
+    print(f"  ✓ Saved CSV")
     
-    # Get group results
-    ad_results = df_results[df_results['Group'] == 'AD']
-    hc_results = df_results[df_results['Group'] == 'HC']
-    
-    # Find best/worst
-    best_idx = df_results['Pearson_r'].idxmax()
-    worst_idx = df_results['Pearson_r'].idxmin()
-    best_subj_id = df_results.loc[best_idx, 'Subject_ID']
-    worst_subj_id = df_results.loc[worst_idx, 'Subject_ID']
-    best_matrix = all_matrices[subject_ids.index(best_subj_id)]
-    worst_matrix = all_matrices[subject_ids.index(worst_subj_id)]
-    best_info = {'id': best_subj_id, 'pearson': df_results.loc[best_idx, 'Pearson_r'], 
-                 'jaccard': df_results.loc[best_idx, 'Jaccard']}
-    worst_info = {'id': worst_subj_id, 'pearson': df_results.loc[worst_idx, 'Pearson_r'], 
-                  'jaccard': df_results.loc[worst_idx, 'Jaccard']}
-    
-    # Create visualizations
-    print("\n" + "="*70)
-    print("STEP 5: CREATING VISUALIZATIONS")
-    print("="*70)
-    
-    create_figure1_consensus_overview(consensus_matrix, sparsity_info, output_folder,
-                                       best_matrix, worst_matrix, best_info, worst_info, consensus_n_edges)
-    
-    create_figure2_pearson_analysis(df_results, ad_results, hc_results, output_folder)
-    
-    create_figure3_jaccard_analysis(df_results, ad_results, hc_results, consensus_n_edges, output_folder)
-    
-    create_figure4_combined_analysis(df_results, ad_results, hc_results, output_folder)
-    
-    create_figure5_subject_ranking(df_results, output_folder)
-    
-    create_figure6_summary(df_results, ad_results, hc_results, sparsity_info, consensus_n_edges, output_folder)
-    
-    # Save additional data
-    print("\n" + "="*70)
-    print("STEP 6: SAVING DATA FILES")
-    print("="*70)
-    
+    # Save NPY files
     np.save(output_folder / 'all_subject_matrices.npy', np.stack(all_matrices))
     np.save(output_folder / 'subject_ids.npy', np.array(subject_ids))
     np.save(output_folder / 'group_labels.npy', np.array(group_labels))
-    print(f"  ✓ Saved: all_subject_matrices.npy, subject_ids.npy, group_labels.npy")
+    
+    ad_df = df[df['Group'] == 'AD']
+    hc_df = df[df['Group'] == 'HC']
+    
+    # Find best/worst
+    best_idx = df['Pearson_r'].idxmax()
+    worst_idx = df['Pearson_r'].idxmin()
+    best_sid = df.loc[best_idx, 'Subject_ID']
+    worst_sid = df.loc[worst_idx, 'Subject_ID']
+    best_matrix = all_matrices[subject_ids.index(best_sid)]
+    worst_matrix = all_matrices[subject_ids.index(worst_sid)]
+    best_info = {'id': best_sid, 'pearson': df.loc[best_idx, 'Pearson_r'], 'jaccard': df.loc[best_idx, 'Jaccard']}
+    worst_info = {'id': worst_sid, 'pearson': df.loc[worst_idx, 'Pearson_r'], 'jaccard': df.loc[worst_idx, 'Jaccard']}
+    
+    # Create figures
+    print("\n" + "="*50)
+    print("CREATING FIGURES")
+    print("="*50)
+    
+    create_figure1(consensus, sparsity_info, best_matrix, worst_matrix, best_info, worst_info, n_edges, output_folder)
+    create_figure2(df, ad_df, hc_df, output_folder)
+    create_figure3(df, ad_df, hc_df, n_edges, output_folder)
+    create_figure4(df, ad_df, hc_df, sparsity_info, n_edges, output_folder)
     
     # Print summary
+    t_p, p_p = stats.ttest_ind(ad_df['Pearson_r'], hc_df['Pearson_r'])
+    t_j, p_j = stats.ttest_ind(ad_df['Jaccard'], hc_df['Jaccard'])
+    sig_p = '***' if p_p < 0.001 else '**' if p_p < 0.01 else '*' if p_p < 0.05 else 'ns'
+    sig_j = '***' if p_j < 0.001 else '**' if p_j < 0.01 else '*' if p_j < 0.05 else 'ns'
+    
     print("\n" + "="*70)
     print("ANALYSIS COMPLETE")
     print("="*70)
-    
-    t_p, p_p = stats.ttest_ind(ad_results['Pearson_r'], hc_results['Pearson_r'])
-    t_j, p_j = stats.ttest_ind(ad_results['Jaccard'], hc_results['Jaccard'])
-    
     print(f"""
-OUTPUT FOLDER: {output_folder.absolute()}
+OUTPUT: {output_folder.absolute()}
 
-FIGURES CREATED:
-  ✓ figure1_consensus_overview.png  - Consensus matrix and examples
-  ✓ figure2_pearson_analysis.png    - Pearson correlation analysis
-  ✓ figure3_jaccard_analysis.png    - Jaccard similarity analysis
-  ✓ figure4_combined_analysis.png   - Combined metrics analysis
-  ✓ figure5_subject_ranking.png     - All subjects ranked
-  ✓ figure6_summary.png             - Publication-ready summary
+FIGURES:
+  ✓ figure1_consensus_overview.png
+  ✓ figure2_pearson_analysis.png
+  ✓ figure3_jaccard_analysis.png
+  ✓ figure4_combined_summary.png
 
-KEY RESULTS:
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+DATA FILES:
+  ✓ subject_vs_saved_consensus.csv
+  ✓ consensus_matrix.npy
+  ✓ all_subject_matrices.npy
 
-  PEARSON CORRELATION (weight similarity)
-    AD (n={n_ad}): {ad_results['Pearson_r'].mean():.3f} ± {ad_results['Pearson_r'].std():.3f}
-    HC (n={n_hc}): {hc_results['Pearson_r'].mean():.3f} ± {hc_results['Pearson_r'].std():.3f}
-    p = {p_p:.4f}
+════════════════════════════════════════════════════════════
+                       KEY RESULTS
+════════════════════════════════════════════════════════════
 
-  JACCARD SIMILARITY (edge overlap)
-    AD (n={n_ad}): {ad_results['Jaccard'].mean():.3f} ± {ad_results['Jaccard'].std():.3f}
-    HC (n={n_hc}): {hc_results['Jaccard'].mean():.3f} ± {hc_results['Jaccard'].std():.3f}
-    p = {p_j:.4f}
+PEARSON CORRELATION (weight similarity):
+  AD (n={n_ad}): {ad_df['Pearson_r'].mean():.3f} ± {ad_df['Pearson_r'].std():.3f}
+  HC (n={n_hc}): {hc_df['Pearson_r'].mean():.3f} ± {hc_df['Pearson_r'].std():.3f}
+  p = {p_p:.4f} {sig_p}
 
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+JACCARD SIMILARITY (edge overlap):
+  AD (n={n_ad}): {ad_df['Jaccard'].mean():.3f} ± {ad_df['Jaccard'].std():.3f}
+  HC (n={n_hc}): {hc_df['Jaccard'].mean():.3f} ± {hc_df['Jaccard'].std():.3f}
+  p = {p_j:.4f} {sig_j}
+
+════════════════════════════════════════════════════════════
 """)
     
-    return {
-        'df_results': df_results,
-        'consensus_matrix': consensus_matrix,
-        'sparsity_info': sparsity_info,
-        'output_folder': output_folder
-    }
+    return {'df': df, 'consensus': consensus, 'sparsity_info': sparsity_info}
 
 
 if __name__ == "__main__":
