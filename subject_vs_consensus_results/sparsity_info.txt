@@ -1,0 +1,16 @@
+CONSENSUS MATRIX SPARSITY ANALYSIS
+==================================================
+
+Source: /home/muhibt/GPVAR/consensus_results/ALL_Files/consensus_distance_graph.npy
+Matrix Shape: 128 x 128
+
+Total Possible Edges: 8,128
+Non-Zero Edges: 892
+
+DENSITY: 0.109744 (10.9744%)
+SPARSITY: 0.890256 (89.0256%)
+
+Edge Weights (non-zero):
+  Mean: 0.350056
+  Max:  0.599730
+  Min:  0.100395
