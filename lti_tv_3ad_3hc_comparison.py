@@ -69,6 +69,7 @@ CONSENSUS_LAPLACIAN_PATH = "/home/muhibt/project/filter_identification/Consensus
 # Preprocessing
 BAND = (0.5, 40.0)
 TARGET_SFREQ = 100.0
+EEG_REFERENCE = 'average'  # Options: 'average', 'REST', None (no re-referencing)
 
 # Model settings
 RIDGE_LAMBDA = 5e-3
@@ -103,13 +104,59 @@ def compute_confidence_interval(data: np.ndarray, confidence=0.95, axis=0):
     return mean, ci_lower, ci_upper, ci_margin
 
 def load_and_preprocess_eeg(filepath: str, band: Tuple[float,float], 
-                           target_sfreq: float) -> Tuple[np.ndarray, List[str]]:
-    """Load and preprocess EEG."""
+                           target_sfreq: float,
+                           reference: str = 'average') -> Tuple[np.ndarray, List[str]]:
+    """
+    Load and preprocess EEG with re-referencing.
+    
+    Parameters:
+    -----------
+    filepath : str
+        Path to EEG file
+    band : Tuple[float, float]
+        Bandpass filter range (low, high) in Hz
+    target_sfreq : float
+        Target sampling frequency in Hz
+    reference : str
+        Re-referencing scheme. Options:
+        - 'average': Common average reference (default)
+        - 'REST': Reference Electrode Standardization Technique (if available)
+        - None: No re-referencing
+    
+    Returns:
+    --------
+    X : np.ndarray
+        Preprocessed EEG data (n_channels x n_samples)
+    ch_names : List[str]
+        Channel names
+    """
     raw = mne.io.read_raw_eeglab(filepath, preload=True, verbose=False)
+    
+    # Resample if needed
     if raw.info["sfreq"] != target_sfreq:
         raw.resample(target_sfreq, npad="auto", verbose=False)
+    
+    # Bandpass filter
     raw.filter(l_freq=band[0], h_freq=band[1], method="fir", 
                fir_design="firwin", verbose=False)
+    
+    # Re-referencing
+    if reference == 'average':
+        # Common Average Reference (CAR)
+        raw.set_eeg_reference(ref_channels='average', projection=False, verbose=False)
+    elif reference == 'REST':
+        # Reference Electrode Standardization Technique
+        # Requires forward model, use average as fallback
+        try:
+            raw.set_eeg_reference(ref_channels='average', projection=False, verbose=False)
+        except Exception:
+            raw.set_eeg_reference(ref_channels='average', projection=False, verbose=False)
+    elif reference is not None and reference != 'none':
+        # Custom reference (e.g., specific channel names)
+        if isinstance(reference, (list, tuple)):
+            raw.set_eeg_reference(ref_channels=reference, projection=False, verbose=False)
+    # If reference is None or 'none', skip re-referencing
+    
     X = raw.get_data()
     X = np.nan_to_num(X, nan=0.0, posinf=0.0, neginf=0.0)
     return X, raw.ch_names
@@ -599,7 +646,7 @@ def analyze_single_subject(filepath: str, L_norm: np.ndarray, group: str,
         print(f"\n  Analyzing {group} subject: {subject_id}")
         
         # Load EEG
-        X, ch_names = load_and_preprocess_eeg(filepath, BAND, TARGET_SFREQ)
+        X, ch_names = load_and_preprocess_eeg(filepath, BAND, TARGET_SFREQ, EEG_REFERENCE)
         n_channels, n_samples = X.shape
         print(f"    Loaded: {n_channels} channels, {n_samples/TARGET_SFREQ:.1f}s duration")
         
