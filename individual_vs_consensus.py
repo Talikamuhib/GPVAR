@@ -401,7 +401,11 @@ def main():
     print("STEP 4: SAVING RESULTS TO CSV")
     print("="*70)
     
-    csv_filename = 'subject_consensus_similarity.csv'
+    # Create output folder
+    output_folder = Path('output')
+    output_folder.mkdir(exist_ok=True)
+    
+    csv_filename = output_folder / 'subject_consensus_similarity.csv'
     df_results.to_csv(csv_filename, index=False)
     print(f"✓ Results saved to: {csv_filename}")
     
@@ -717,7 +721,7 @@ def main():
     plt.tight_layout(rect=[0, 0, 1, 0.97])
     
     # Save figure
-    fig_filename = 'subject_consensus_similarity.png'
+    fig_filename = output_folder / 'subject_consensus_similarity.png'
     plt.savefig(fig_filename, dpi=300, bbox_inches='tight', facecolor='white')
     print(f"✓ Figure saved: {fig_filename}")
     
@@ -849,7 +853,7 @@ def main():
                  fontsize=14, fontweight='bold', y=0.99)
     plt.tight_layout(rect=[0, 0, 1, 0.97])
     
-    fig2_filename = 'subject_ranking_detailed.png'
+    fig2_filename = output_folder / 'subject_ranking_detailed.png'
     plt.savefig(fig2_filename, dpi=300, bbox_inches='tight', facecolor='white')
     print(f"✓ Figure saved: {fig2_filename}")
     
@@ -863,20 +867,20 @@ def main():
     print("="*70)
     
     # Save overall consensus matrix
-    np.save('overall_consensus_matrix.npy', overall_consensus)
-    print(f"✓ Saved: overall_consensus_matrix.npy (shape: {overall_consensus.shape})")
+    np.save(output_folder / 'overall_consensus_matrix.npy', overall_consensus)
+    print(f"✓ Saved: {output_folder}/overall_consensus_matrix.npy (shape: {overall_consensus.shape})")
     
     # Save all individual subject matrices as a 3D array
     all_matrices_array = np.stack(all_matrices, axis=0)
-    np.save('all_subject_matrices.npy', all_matrices_array)
-    print(f"✓ Saved: all_subject_matrices.npy (shape: {all_matrices_array.shape})")
+    np.save(output_folder / 'all_subject_matrices.npy', all_matrices_array)
+    print(f"✓ Saved: {output_folder}/all_subject_matrices.npy (shape: {all_matrices_array.shape})")
     
     # Save subject IDs and group labels
-    np.save('subject_ids.npy', np.array(subject_ids))
-    print(f"✓ Saved: subject_ids.npy ({len(subject_ids)} subjects)")
+    np.save(output_folder / 'subject_ids.npy', np.array(subject_ids))
+    print(f"✓ Saved: {output_folder}/subject_ids.npy ({len(subject_ids)} subjects)")
     
-    np.save('group_labels.npy', np.array(group_labels))
-    print(f"✓ Saved: group_labels.npy ({len(group_labels)} labels)")
+    np.save(output_folder / 'group_labels.npy', np.array(group_labels))
+    print(f"✓ Saved: {output_folder}/group_labels.npy ({len(group_labels)} labels)")
     
     # Save AD and HC matrices separately
     ad_matrices = [all_matrices[i] for i in range(len(all_matrices)) if group_labels[i] == 'AD']
@@ -885,21 +889,21 @@ def main():
     ad_matrices_array = np.stack(ad_matrices, axis=0)
     hc_matrices_array = np.stack(hc_matrices, axis=0)
     
-    np.save('ad_subject_matrices.npy', ad_matrices_array)
-    print(f"✓ Saved: ad_subject_matrices.npy (shape: {ad_matrices_array.shape})")
+    np.save(output_folder / 'ad_subject_matrices.npy', ad_matrices_array)
+    print(f"✓ Saved: {output_folder}/ad_subject_matrices.npy (shape: {ad_matrices_array.shape})")
     
-    np.save('hc_subject_matrices.npy', hc_matrices_array)
-    print(f"✓ Saved: hc_subject_matrices.npy (shape: {hc_matrices_array.shape})")
+    np.save(output_folder / 'hc_subject_matrices.npy', hc_matrices_array)
+    print(f"✓ Saved: {output_folder}/hc_subject_matrices.npy (shape: {hc_matrices_array.shape})")
     
     # Save group-specific consensus matrices
     ad_consensus = compute_consensus_matrix(ad_matrices)
     hc_consensus = compute_consensus_matrix(hc_matrices)
     
-    np.save('ad_consensus_matrix.npy', ad_consensus)
-    print(f"✓ Saved: ad_consensus_matrix.npy (shape: {ad_consensus.shape})")
+    np.save(output_folder / 'ad_consensus_matrix.npy', ad_consensus)
+    print(f"✓ Saved: {output_folder}/ad_consensus_matrix.npy (shape: {ad_consensus.shape})")
     
-    np.save('hc_consensus_matrix.npy', hc_consensus)
-    print(f"✓ Saved: hc_consensus_matrix.npy (shape: {hc_consensus.shape})")
+    np.save(output_folder / 'hc_consensus_matrix.npy', hc_consensus)
+    print(f"✓ Saved: {output_folder}/hc_consensus_matrix.npy (shape: {hc_consensus.shape})")
     
     # =========================================================================
     # FINAL OUTPUT
@@ -909,7 +913,7 @@ def main():
     print("="*70)
     
     print(f"""
-OUTPUT FILES:
+OUTPUT FILES (saved in '{output_folder}/' folder):
   CSV:
   ✓ {csv_filename} - All subject similarity metrics
   
@@ -918,14 +922,14 @@ OUTPUT FILES:
   ✓ {fig2_filename} - Detailed ranking figure
   
   NUMPY DATA (.npy):
-  ✓ overall_consensus_matrix.npy - Consensus matrix from all subjects
-  ✓ all_subject_matrices.npy - All individual subject matrices (3D array)
-  ✓ subject_ids.npy - Subject ID array
-  ✓ group_labels.npy - Group label array (AD/HC)
-  ✓ ad_subject_matrices.npy - AD group individual matrices
-  ✓ hc_subject_matrices.npy - HC group individual matrices
-  ✓ ad_consensus_matrix.npy - AD group consensus matrix
-  ✓ hc_consensus_matrix.npy - HC group consensus matrix
+  ✓ {output_folder}/overall_consensus_matrix.npy - Consensus matrix from all subjects
+  ✓ {output_folder}/all_subject_matrices.npy - All individual subject matrices (3D array)
+  ✓ {output_folder}/subject_ids.npy - Subject ID array
+  ✓ {output_folder}/group_labels.npy - Group label array (AD/HC)
+  ✓ {output_folder}/ad_subject_matrices.npy - AD group individual matrices
+  ✓ {output_folder}/hc_subject_matrices.npy - HC group individual matrices
+  ✓ {output_folder}/ad_consensus_matrix.npy - AD group consensus matrix
+  ✓ {output_folder}/hc_consensus_matrix.npy - HC group consensus matrix
 
 CSV COLUMNS:
   • Subject_ID: Subject identifier
@@ -941,10 +945,10 @@ CSV COLUMNS:
 
 HOW TO LOAD .NPY FILES:
   >>> import numpy as np
-  >>> consensus = np.load('overall_consensus_matrix.npy')
-  >>> all_matrices = np.load('all_subject_matrices.npy')
-  >>> subject_ids = np.load('subject_ids.npy', allow_pickle=True)
-  >>> group_labels = np.load('group_labels.npy', allow_pickle=True)
+  >>> consensus = np.load('{output_folder}/overall_consensus_matrix.npy')
+  >>> all_matrices = np.load('{output_folder}/all_subject_matrices.npy')
+  >>> subject_ids = np.load('{output_folder}/subject_ids.npy', allow_pickle=True)
+  >>> group_labels = np.load('{output_folder}/group_labels.npy', allow_pickle=True)
 """)
     
     return {
