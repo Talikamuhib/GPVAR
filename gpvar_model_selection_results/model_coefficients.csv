@@ -1,0 +1,3 @@
+p (lag),k (L^k),"h_{p,k}",interpretation
+1,0,0.0,Weight of L^0 at lag 1
+1,1,0.0,Weight of L^1 at lag 1
