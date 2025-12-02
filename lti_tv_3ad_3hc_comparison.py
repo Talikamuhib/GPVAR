@@ -1387,6 +1387,436 @@ def plot_ad_vs_hc_comparison(ad_results: List[Dict], hc_results: List[Dict],
     plt.close()
     print(f"  Saved: {savepath3}")
 
+def compute_frequency_band_statistics(ad_results: List[Dict], hc_results: List[Dict]) -> pd.DataFrame:
+    """
+    Compute statistics for standard EEG frequency bands.
+    Bands: Delta (0.5-4 Hz), Theta (4-8 Hz), Alpha (8-13 Hz), 
+           Beta (13-30 Hz), Gamma (30-40 Hz)
+    """
+    # Define frequency bands
+    bands = {
+        'delta': (0.5, 4.0),
+        'theta': (4.0, 8.0),
+        'alpha': (8.0, 13.0),
+        'beta': (13.0, 30.0),
+        'gamma': (30.0, 40.0)
+    }
+    
+    freqs_hz = ad_results[0]['freqs_hz']
+    
+    band_stats = []
+    
+    for band_name, (f_low, f_high) in bands.items():
+        # Find frequency indices for this band
+        band_mask = (freqs_hz >= f_low) & (freqs_hz <= f_high)
+        
+        # Extract mean magnitude in this band for each subject (averaged over modes)
+        ad_lti_band = np.array([r['G_lti'][band_mask, :].mean() for r in ad_results])
+        hc_lti_band = np.array([r['G_lti'][band_mask, :].mean() for r in hc_results])
+        
+        ad_tv_band = np.array([r['G_tv_mean'][band_mask, :].mean() for r in ad_results])
+        hc_tv_band = np.array([r['G_tv_mean'][band_mask, :].mean() for r in hc_results])
+        
+        # LTI statistics
+        t_lti, p_lti = stats.ttest_ind(ad_lti_band, hc_lti_band, equal_var=False)
+        d_lti = (ad_lti_band.mean() - hc_lti_band.mean()) / np.sqrt((ad_lti_band.std()**2 + hc_lti_band.std()**2) / 2 + 1e-10)
+        
+        # TV statistics
+        t_tv, p_tv = stats.ttest_ind(ad_tv_band, hc_tv_band, equal_var=False)
+        d_tv = (ad_tv_band.mean() - hc_tv_band.mean()) / np.sqrt((ad_tv_band.std()**2 + hc_tv_band.std()**2) / 2 + 1e-10)
+        
+        band_stats.append({
+            'band': band_name,
+            'freq_range': f'{f_low}-{f_high} Hz',
+            'model_type': 'LTI',
+            'AD_mean': ad_lti_band.mean(),
+            'AD_std': ad_lti_band.std(),
+            'HC_mean': hc_lti_band.mean(),
+            'HC_std': hc_lti_band.std(),
+            't_statistic': t_lti,
+            'p_value': p_lti,
+            'cohens_d': d_lti,
+            'significant': p_lti < 0.05
+        })
+        
+        band_stats.append({
+            'band': band_name,
+            'freq_range': f'{f_low}-{f_high} Hz',
+            'model_type': 'TV',
+            'AD_mean': ad_tv_band.mean(),
+            'AD_std': ad_tv_band.std(),
+            'HC_mean': hc_tv_band.mean(),
+            'HC_std': hc_tv_band.std(),
+            't_statistic': t_tv,
+            'p_value': p_tv,
+            'cohens_d': d_tv,
+            'significant': p_tv < 0.05
+        })
+    
+    return pd.DataFrame(band_stats)
+
+def plot_comprehensive_frequency_analysis(ad_results: List[Dict], hc_results: List[Dict],
+                                          band_stats_df: pd.DataFrame, save_dir: Path):
+    """
+    Create comprehensive frequency analysis plots with statistical tables.
+    """
+    print("\nCreating comprehensive frequency analysis plots...")
+    
+    freqs_hz = ad_results[0]['freqs_hz']
+    lambdas = ad_results[0]['lambdas']
+    n_lambdas = len(lambdas)
+    graph_freq_indices = np.arange(n_lambdas)
+    
+    color_ad = '#E74C3C'
+    color_hc = '#3498DB'
+    
+    # Frequency bands
+    bands = {'Delta': (0.5, 4), 'Theta': (4, 8), 'Alpha': (8, 13), 
+             'Beta': (13, 30), 'Gamma': (30, 40)}
+    band_colors = {'Delta': '#E8E8E8', 'Theta': '#D5E5F5', 'Alpha': '#D5F5E5',
+                   'Beta': '#FFF8DC', 'Gamma': '#FFE5E5'}
+    
+    # Compute mode-averaged responses
+    ad_lti_freq = np.array([r['G_lti'].mean(axis=1) for r in ad_results])
+    hc_lti_freq = np.array([r['G_lti'].mean(axis=1) for r in hc_results])
+    ad_tv_freq = np.array([r['G_tv_mean'].mean(axis=1) for r in ad_results])
+    hc_tv_freq = np.array([r['G_tv_mean'].mean(axis=1) for r in hc_results])
+    
+    # Means and CIs
+    ad_lti_mean, ad_lti_ci_lo, ad_lti_ci_hi, _ = compute_confidence_interval(ad_lti_freq, axis=0)
+    hc_lti_mean, hc_lti_ci_lo, hc_lti_ci_hi, _ = compute_confidence_interval(hc_lti_freq, axis=0)
+    ad_tv_mean, ad_tv_ci_lo, ad_tv_ci_hi, _ = compute_confidence_interval(ad_tv_freq, axis=0)
+    hc_tv_mean, hc_tv_ci_lo, hc_tv_ci_hi, _ = compute_confidence_interval(hc_tv_freq, axis=0)
+    
+    # =================================================================
+    # Figure: Comprehensive Frequency Analysis
+    # =================================================================
+    
+    fig = plt.figure(figsize=(20, 16))
+    gs = GridSpec(4, 3, figure=fig, hspace=0.35, wspace=0.3)
+    
+    # --- Row 1: LTI Mode-Averaged Frequency Response with 95% CI ---
+    ax1 = fig.add_subplot(gs[0, :])
+    
+    # Add frequency band shading
+    for band_name, (f_low, f_high) in bands.items():
+        ax1.axvspan(f_low, f_high, alpha=0.15, color=band_colors[band_name], zorder=0)
+    
+    # Plot with 95% CI
+    ax1.plot(freqs_hz, ad_lti_mean, color=color_ad, linewidth=3, 
+             label=f'AD (n={len(ad_results)})', zorder=3)
+    ax1.fill_between(freqs_hz, ad_lti_ci_lo, ad_lti_ci_hi,
+                     color=color_ad, alpha=0.25, zorder=2)
+    ax1.plot(freqs_hz, hc_lti_mean, color=color_hc, linewidth=3, 
+             label=f'HC (n={len(hc_results)})', zorder=3)
+    ax1.fill_between(freqs_hz, hc_lti_ci_lo, hc_lti_ci_hi,
+                     color=color_hc, alpha=0.25, zorder=2)
+    
+    # Add band labels
+    y_max = max(ad_lti_mean.max(), hc_lti_mean.max())
+    y_min = min(ad_lti_mean.min(), hc_lti_mean.min())
+    for band_name, (f_low, f_high) in bands.items():
+        ax1.text((f_low + f_high) / 2, y_max * 1.02, band_name, 
+                ha='center', va='bottom', fontsize=10, fontweight='bold')
+    
+    ax1.set_xlabel('Frequency (Hz)', fontsize=12, fontweight='bold')
+    ax1.set_ylabel('Mode-Averaged |G(ω)|', fontsize=12, fontweight='bold')
+    ax1.set_title('(A) LTI Model: Mode-Averaged Frequency Response with 95% CI', 
+                  fontsize=14, fontweight='bold')
+    ax1.legend(fontsize=11, loc='upper right')
+    ax1.grid(True, alpha=0.3, linestyle='--')
+    ax1.set_xlim([freqs_hz.min(), freqs_hz.max()])
+    
+    # --- Row 2: TV Mode-Averaged Frequency Response with 95% CI ---
+    ax2 = fig.add_subplot(gs[1, :])
+    
+    for band_name, (f_low, f_high) in bands.items():
+        ax2.axvspan(f_low, f_high, alpha=0.15, color=band_colors[band_name], zorder=0)
+    
+    ax2.plot(freqs_hz, ad_tv_mean, '--', color=color_ad, linewidth=3,
+             label=f'AD (n={len(ad_results)})', zorder=3)
+    ax2.fill_between(freqs_hz, ad_tv_ci_lo, ad_tv_ci_hi,
+                     color=color_ad, alpha=0.25, zorder=2)
+    ax2.plot(freqs_hz, hc_tv_mean, '--', color=color_hc, linewidth=3,
+             label=f'HC (n={len(hc_results)})', zorder=3)
+    ax2.fill_between(freqs_hz, hc_tv_ci_lo, hc_tv_ci_hi,
+                     color=color_hc, alpha=0.25, zorder=2)
+    
+    ax2.set_xlabel('Frequency (Hz)', fontsize=12, fontweight='bold')
+    ax2.set_ylabel('Mode-Averaged |G(ω)|', fontsize=12, fontweight='bold')
+    ax2.set_title('(B) Time-Varying Model: Mode-Averaged Frequency Response with 95% CI', 
+                  fontsize=14, fontweight='bold')
+    ax2.legend(fontsize=11, loc='upper right')
+    ax2.grid(True, alpha=0.3, linestyle='--')
+    ax2.set_xlim([freqs_hz.min(), freqs_hz.max()])
+    
+    # --- Row 3: Difference and Effect Size plots ---
+    
+    # Difference plot (LTI)
+    ax3 = fig.add_subplot(gs[2, 0])
+    diff_lti = ad_lti_mean - hc_lti_mean
+    ax3.plot(freqs_hz, diff_lti, 'k-', linewidth=2.5)
+    ax3.axhline(0, color='gray', linestyle='-', linewidth=1.5, alpha=0.5)
+    ax3.fill_between(freqs_hz, 0, diff_lti, where=(diff_lti > 0), 
+                     color=color_ad, alpha=0.4, label='AD > HC')
+    ax3.fill_between(freqs_hz, 0, diff_lti, where=(diff_lti < 0),
+                     color=color_hc, alpha=0.4, label='HC > AD')
+    ax3.set_xlabel('Frequency (Hz)', fontsize=12, fontweight='bold')
+    ax3.set_ylabel('Δ|G| (AD - HC)', fontsize=12, fontweight='bold')
+    ax3.set_title('(C) LTI Difference', fontsize=13, fontweight='bold')
+    ax3.legend(fontsize=9)
+    ax3.grid(True, alpha=0.3)
+    ax3.set_xlim([freqs_hz.min(), freqs_hz.max()])
+    
+    # Difference plot (TV)
+    ax4 = fig.add_subplot(gs[2, 1])
+    diff_tv = ad_tv_mean - hc_tv_mean
+    ax4.plot(freqs_hz, diff_tv, 'k--', linewidth=2.5)
+    ax4.axhline(0, color='gray', linestyle='-', linewidth=1.5, alpha=0.5)
+    ax4.fill_between(freqs_hz, 0, diff_tv, where=(diff_tv > 0),
+                     color=color_ad, alpha=0.4, label='AD > HC')
+    ax4.fill_between(freqs_hz, 0, diff_tv, where=(diff_tv < 0),
+                     color=color_hc, alpha=0.4, label='HC > AD')
+    ax4.set_xlabel('Frequency (Hz)', fontsize=12, fontweight='bold')
+    ax4.set_ylabel('Δ|G| (AD - HC)', fontsize=12, fontweight='bold')
+    ax4.set_title('(D) TV Difference', fontsize=13, fontweight='bold')
+    ax4.legend(fontsize=9)
+    ax4.grid(True, alpha=0.3)
+    ax4.set_xlim([freqs_hz.min(), freqs_hz.max()])
+    
+    # Effect size by frequency band
+    ax5 = fig.add_subplot(gs[2, 2])
+    band_names_ordered = ['Delta', 'Theta', 'Alpha', 'Beta', 'Gamma']
+    lti_bands = band_stats_df[band_stats_df['model_type'] == 'LTI']
+    tv_bands = band_stats_df[band_stats_df['model_type'] == 'TV']
+    
+    lti_d = [lti_bands[lti_bands['band'] == b.lower()]['cohens_d'].values[0] for b in band_names_ordered]
+    tv_d = [tv_bands[tv_bands['band'] == b.lower()]['cohens_d'].values[0] for b in band_names_ordered]
+    lti_p = [lti_bands[lti_bands['band'] == b.lower()]['p_value'].values[0] for b in band_names_ordered]
+    tv_p = [tv_bands[tv_bands['band'] == b.lower()]['p_value'].values[0] for b in band_names_ordered]
+    
+    x = np.arange(len(band_names_ordered))
+    width = 0.35
+    
+    bars1 = ax5.bar(x - width/2, lti_d, width, label='LTI', color=color_ad, alpha=0.7, edgecolor='black')
+    bars2 = ax5.bar(x + width/2, tv_d, width, label='TV', color=color_hc, alpha=0.7, edgecolor='black')
+    
+    # Add significance markers
+    for i, (d_lti, d_tv, p_lti, p_tv) in enumerate(zip(lti_d, tv_d, lti_p, tv_p)):
+        if p_lti < 0.05:
+            sig = '***' if p_lti < 0.001 else '**' if p_lti < 0.01 else '*'
+            ax5.text(i - width/2, d_lti + 0.1 * np.sign(d_lti), sig, 
+                    ha='center', va='bottom' if d_lti > 0 else 'top', 
+                    fontsize=10, fontweight='bold')
+        if p_tv < 0.05:
+            sig = '***' if p_tv < 0.001 else '**' if p_tv < 0.01 else '*'
+            ax5.text(i + width/2, d_tv + 0.1 * np.sign(d_tv), sig,
+                    ha='center', va='bottom' if d_tv > 0 else 'top',
+                    fontsize=10, fontweight='bold')
+    
+    ax5.axhline(0, color='black', linewidth=1.5)
+    ax5.axhline(0.5, color='gray', linestyle='--', linewidth=1, alpha=0.5)
+    ax5.axhline(-0.5, color='gray', linestyle='--', linewidth=1, alpha=0.5)
+    ax5.axhline(0.8, color='gray', linestyle=':', linewidth=1, alpha=0.5)
+    ax5.axhline(-0.8, color='gray', linestyle=':', linewidth=1, alpha=0.5)
+    
+    ax5.set_xlabel('Frequency Band', fontsize=12, fontweight='bold')
+    ax5.set_ylabel("Cohen's d (AD - HC)", fontsize=12, fontweight='bold')
+    ax5.set_title("(E) Effect Sizes by Band", fontsize=13, fontweight='bold')
+    ax5.set_xticks(x)
+    ax5.set_xticklabels(band_names_ordered)
+    ax5.legend(fontsize=9)
+    ax5.grid(True, alpha=0.3, axis='y')
+    
+    # --- Row 4: Statistical Summary Table ---
+    ax6 = fig.add_subplot(gs[3, :])
+    ax6.axis('off')
+    
+    # Create table data
+    table_data = []
+    headers = ['Band', 'Freq Range', 'Model', 'AD Mean±SD', 'HC Mean±SD', 'Δ', 'p-value', "Cohen's d", 'Sig']
+    
+    for band_name in band_names_ordered:
+        lti_row = lti_bands[lti_bands['band'] == band_name.lower()].iloc[0]
+        tv_row = tv_bands[tv_bands['band'] == band_name.lower()].iloc[0]
+        
+        for row, model in [(lti_row, 'LTI'), (tv_row, 'TV')]:
+            sig_marker = '***' if row['p_value'] < 0.001 else '**' if row['p_value'] < 0.01 else '*' if row['p_value'] < 0.05 else 'ns'
+            delta = row['AD_mean'] - row['HC_mean']
+            direction = '↑' if delta > 0 else '↓'
+            
+            table_data.append([
+                band_name if model == 'LTI' else '',
+                row['freq_range'] if model == 'LTI' else '',
+                model,
+                f"{row['AD_mean']:.3f}±{row['AD_std']:.3f}",
+                f"{row['HC_mean']:.3f}±{row['HC_std']:.3f}",
+                f"{direction}{abs(delta):.3f}",
+                f"{row['p_value']:.4f}",
+                f"{row['cohens_d']:+.3f}",
+                sig_marker
+            ])
+    
+    table = ax6.table(cellText=table_data, colLabels=headers,
+                      cellLoc='center', loc='center',
+                      bbox=[0, 0.1, 1, 0.9])
+    
+    table.auto_set_font_size(False)
+    table.set_fontsize(9)
+    table.scale(1, 1.8)
+    
+    # Style header
+    for i in range(len(headers)):
+        cell = table[(0, i)]
+        cell.set_facecolor('#34495E')
+        cell.set_text_props(weight='bold', color='white')
+    
+    # Style rows
+    for i, row_data in enumerate(table_data, 1):
+        row_color = '#ECF0F1' if i % 2 == 0 else 'white'
+        if row_data[-1] != 'ns':
+            row_color = '#FADBD8'
+        for j in range(len(headers)):
+            cell = table[(i, j)]
+            cell.set_facecolor(row_color)
+    
+    ax6.set_title('(F) Frequency Band Statistics Summary', fontsize=13, fontweight='bold', pad=20)
+    
+    plt.suptitle('Comprehensive Frequency Analysis: AD vs HC\nTransfer Function Magnitude Analysis', 
+                 fontsize=16, fontweight='bold', y=0.995)
+    plt.tight_layout(rect=[0, 0, 1, 0.99])
+    
+    savepath = save_dir / 'comprehensive_frequency_analysis.png'
+    plt.savefig(savepath, dpi=300, bbox_inches='tight', facecolor='white')
+    plt.close()
+    print(f"  Saved: {savepath}")
+
+def plot_graph_mode_analysis(ad_results: List[Dict], hc_results: List[Dict], save_dir: Path):
+    """
+    Create graph mode analysis plots with effect sizes.
+    Uses indexed graph frequency with eigenvalue secondary axis.
+    """
+    print("\nCreating graph mode analysis plots...")
+    
+    lambdas = ad_results[0]['lambdas']
+    n_lambdas = len(lambdas)
+    graph_freq_indices = np.arange(n_lambdas)
+    
+    color_ad = '#E74C3C'
+    color_hc = '#3498DB'
+    
+    # Compute frequency-averaged mode responses
+    ad_lti_mode = np.array([r['G_lti'].mean(axis=0) for r in ad_results])
+    hc_lti_mode = np.array([r['G_lti'].mean(axis=0) for r in hc_results])
+    ad_tv_mode = np.array([r['G_tv_mean'].mean(axis=0) for r in ad_results])
+    hc_tv_mode = np.array([r['G_tv_mean'].mean(axis=0) for r in hc_results])
+    
+    # Means and CIs
+    ad_lti_mean, ad_lti_ci_lo, ad_lti_ci_hi, _ = compute_confidence_interval(ad_lti_mode, axis=0)
+    hc_lti_mean, hc_lti_ci_lo, hc_lti_ci_hi, _ = compute_confidence_interval(hc_lti_mode, axis=0)
+    ad_tv_mean, ad_tv_ci_lo, ad_tv_ci_hi, _ = compute_confidence_interval(ad_tv_mode, axis=0)
+    hc_tv_mean, hc_tv_ci_lo, hc_tv_ci_hi, _ = compute_confidence_interval(hc_tv_mode, axis=0)
+    
+    # Effect sizes per mode
+    def compute_effect_size(ad_vals, hc_vals):
+        pooled = np.sqrt((ad_vals.var(axis=0, ddof=1) + hc_vals.var(axis=0, ddof=1)) / 2)
+        return (ad_vals.mean(axis=0) - hc_vals.mean(axis=0)) / (pooled + 1e-10)
+    
+    lti_effect = compute_effect_size(ad_lti_mode, hc_lti_mode)
+    tv_effect = compute_effect_size(ad_tv_mode, hc_tv_mode)
+    
+    # =================================================================
+    # Figure: Graph Mode Analysis
+    # =================================================================
+    
+    fig, axes = plt.subplots(2, 2, figsize=(18, 12))
+    
+    # Panel A: LTI response vs graph frequency index
+    ax = axes[0, 0]
+    ax.plot(graph_freq_indices, ad_lti_mean, color=color_ad, linewidth=3,
+            label=f'AD (n={len(ad_results)})')
+    ax.fill_between(graph_freq_indices, ad_lti_ci_lo, ad_lti_ci_hi,
+                    color=color_ad, alpha=0.25)
+    ax.plot(graph_freq_indices, hc_lti_mean, color=color_hc, linewidth=3,
+            label=f'HC (n={len(hc_results)})')
+    ax.fill_between(graph_freq_indices, hc_lti_ci_lo, hc_lti_ci_hi,
+                    color=color_hc, alpha=0.25)
+    
+    ax.set_xlabel('Graph Frequency Index (sorted eigenvalue index)', fontsize=12, fontweight='bold')
+    ax.set_ylabel('Frequency-Averaged |G(ω,λ)|', fontsize=12, fontweight='bold')
+    ax.set_title('(A) LTI: Transfer Function vs Graph Mode', fontsize=13, fontweight='bold')
+    ax.legend(fontsize=10)
+    ax.grid(True, linestyle='--', alpha=0.3)
+    ax.set_xlim([0, n_lambdas - 1])
+    add_eigenvalue_secondary_axis(ax, lambdas, n_ticks=8)
+    
+    # Panel B: TV response vs graph frequency index
+    ax = axes[0, 1]
+    ax.plot(graph_freq_indices, ad_tv_mean, '--', color=color_ad, linewidth=3,
+            label=f'AD (n={len(ad_results)})')
+    ax.fill_between(graph_freq_indices, ad_tv_ci_lo, ad_tv_ci_hi,
+                    color=color_ad, alpha=0.25)
+    ax.plot(graph_freq_indices, hc_tv_mean, '--', color=color_hc, linewidth=3,
+            label=f'HC (n={len(hc_results)})')
+    ax.fill_between(graph_freq_indices, hc_tv_ci_lo, hc_tv_ci_hi,
+                    color=color_hc, alpha=0.25)
+    
+    ax.set_xlabel('Graph Frequency Index (sorted eigenvalue index)', fontsize=12, fontweight='bold')
+    ax.set_ylabel('Frequency-Averaged |G(ω,λ)|', fontsize=12, fontweight='bold')
+    ax.set_title('(B) Time-Varying: Transfer Function vs Graph Mode', fontsize=13, fontweight='bold')
+    ax.legend(fontsize=10)
+    ax.grid(True, linestyle='--', alpha=0.3)
+    ax.set_xlim([0, n_lambdas - 1])
+    add_eigenvalue_secondary_axis(ax, lambdas, n_ticks=8)
+    
+    # Panel C: Difference curves
+    ax = axes[1, 0]
+    diff_lti = ad_lti_mean - hc_lti_mean
+    diff_tv = ad_tv_mean - hc_tv_mean
+    
+    ax.plot(graph_freq_indices, diff_lti, color='black', linewidth=2.5, label='LTI Δ|G|')
+    ax.fill_between(graph_freq_indices, 0, diff_lti, where=(diff_lti > 0),
+                    color=color_ad, alpha=0.4, label='AD > HC')
+    ax.fill_between(graph_freq_indices, 0, diff_lti, where=(diff_lti < 0),
+                    color=color_hc, alpha=0.4, label='HC > AD')
+    ax.plot(graph_freq_indices, diff_tv, color='black', linewidth=2.0, linestyle='--', label='TV Δ|G|')
+    
+    ax.axhline(0, color='gray', linestyle='-', linewidth=1.2)
+    ax.set_xlabel('Graph Frequency Index (sorted eigenvalue index)', fontsize=12, fontweight='bold')
+    ax.set_ylabel('Difference Δ|G| (AD - HC)', fontsize=12, fontweight='bold')
+    ax.set_title('(C) Group Differences Across Graph Modes', fontsize=13, fontweight='bold')
+    ax.legend(fontsize=9)
+    ax.grid(True, linestyle='--', alpha=0.3)
+    ax.set_xlim([0, n_lambdas - 1])
+    add_eigenvalue_secondary_axis(ax, lambdas, n_ticks=8)
+    
+    # Panel D: Effect sizes
+    ax = axes[1, 1]
+    ax.plot(graph_freq_indices, lti_effect, color=color_ad, linewidth=2.5, label="LTI Cohen's d")
+    ax.plot(graph_freq_indices, tv_effect, '--', color=color_hc, linewidth=2.5, label="TV Cohen's d")
+    ax.axhline(0, color='black', linewidth=1.2)
+    ax.axhline(0.5, color='gray', linestyle='--', linewidth=1.0, alpha=0.6, label='Medium (d=0.5)')
+    ax.axhline(-0.5, color='gray', linestyle='--', linewidth=1.0, alpha=0.6)
+    ax.axhline(0.8, color='gray', linestyle=':', linewidth=1.0, alpha=0.6, label='Large (d=0.8)')
+    ax.axhline(-0.8, color='gray', linestyle=':', linewidth=1.0, alpha=0.6)
+    
+    ax.set_xlabel('Graph Frequency Index (sorted eigenvalue index)', fontsize=12, fontweight='bold')
+    ax.set_ylabel("Cohen's d (AD - HC)", fontsize=12, fontweight='bold')
+    ax.set_title('(D) Effect Size Across Graph Modes', fontsize=13, fontweight='bold')
+    ax.legend(fontsize=9, loc='best')
+    ax.grid(True, linestyle='--', alpha=0.3)
+    ax.set_xlim([0, n_lambdas - 1])
+    add_eigenvalue_secondary_axis(ax, lambdas, n_ticks=8)
+    
+    plt.suptitle('Graph Mode Analysis: AD vs HC\nTransfer Function vs Graph Frequency Index', 
+                 fontsize=16, fontweight='bold')
+    plt.tight_layout()
+    
+    savepath = save_dir / 'graph_mode_analysis.png'
+    plt.savefig(savepath, dpi=300, bbox_inches='tight', facecolor='white')
+    plt.close()
+    print(f"  Saved: {savepath}")
+
 def compute_and_save_statistics(ad_results: List[Dict], hc_results: List[Dict],
                                 save_dir: Path):
     """Compute and save statistical comparisons."""
@@ -1489,10 +1919,28 @@ def main():
     # Create summary plots
     plot_group_model_selection_summary(ad_results, hc_results, OUT_DIR)
     
-    # Create AD vs HC comparison plots
+    # Create AD vs HC comparison plots (heatmaps and line plots)
     plot_ad_vs_hc_comparison(ad_results, hc_results, OUT_DIR)
     
-    # Compute statistics
+    # Compute frequency band statistics
+    print("\n" + "="*80)
+    print("FREQUENCY BAND ANALYSIS")
+    print("="*80)
+    band_stats_df = compute_frequency_band_statistics(ad_results, hc_results)
+    print(band_stats_df.to_string(index=False))
+    
+    # Save band statistics
+    band_stats_csv = OUT_DIR / 'frequency_band_statistics.csv'
+    band_stats_df.to_csv(band_stats_csv, index=False)
+    print(f"\nSaved: {band_stats_csv}")
+    
+    # Create comprehensive frequency analysis plots with statistical table
+    plot_comprehensive_frequency_analysis(ad_results, hc_results, band_stats_df, OUT_DIR)
+    
+    # Create graph mode analysis plots with effect sizes
+    plot_graph_mode_analysis(ad_results, hc_results, OUT_DIR)
+    
+    # Compute overall statistics
     stats_df = compute_and_save_statistics(ad_results, hc_results, OUT_DIR)
     
     # Final summary
@@ -1506,10 +1954,38 @@ def main():
     print("  - all_subjects_model_selection.csv")
     print("  - model_selection_summary.csv")
     print("  - model_selection_summary.png")
-    print("  - ad_vs_hc_transfer_functions.png")
+    print("  - ad_vs_hc_transfer_functions.png (2D heatmaps)")
     print("  - ad_vs_hc_detailed_comparison.png")
     print("  - ad_vs_hc_individual_traces.png")
+    print("  - frequency_band_statistics.csv")
+    print("  - comprehensive_frequency_analysis.png (with statistical table)")
+    print("  - graph_mode_analysis.png (with effect sizes)")
     print("  - group_statistics.csv")
+    
+    # Print significant findings
+    print("\n" + "-"*40)
+    print("SIGNIFICANT FINDINGS (p < 0.05)")
+    print("-"*40)
+    
+    # Overall metrics
+    if stats_df is not None:
+        sig_overall = stats_df[stats_df['significant']]
+        if len(sig_overall) > 0:
+            print("\nOverall Metrics:")
+            for _, row in sig_overall.iterrows():
+                print(f"  - {row['metric']}: p={row['p_value']:.4f}, d={row['cohens_d']:.3f}")
+        else:
+            print("\nOverall Metrics: No significant differences")
+    
+    # Frequency bands
+    sig_bands = band_stats_df[band_stats_df['significant']]
+    if len(sig_bands) > 0:
+        print("\nFrequency Bands:")
+        for _, row in sig_bands.iterrows():
+            print(f"  - {row['band'].upper()} ({row['model_type']}): p={row['p_value']:.4f}, d={row['cohens_d']:.3f}")
+    else:
+        print("\nFrequency Bands: No significant differences")
+    
     print("="*80)
 
 if __name__ == "__main__":
