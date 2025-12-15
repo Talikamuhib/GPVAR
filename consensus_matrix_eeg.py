@@ -1,21 +1,17 @@
 """
-Consensus Matrix Implementation for EEG Connectivity Analysis
-Using Pearson Correlation with Distance-Dependent Thresholding
+Consensus Matrix Implementation for EEG Connectivity Analysis.
 
-This implementation follows the Betzel-style consensus approach for building
-group-level brain networks from individual subject connectivity matrices.
+Build group-level brain networks from individual subject connectivity matrices
+using Fisher-z averaging. Supports both direct averaging (recommended) and 
+Betzel-style binarization-based consensus approaches.
 """
 
 import numpy as np
 import scipy.io as sio
-import scipy.stats as stats
 from scipy.spatial.distance import pdist, squareform
-from scipy.signal import hilbert
 import mne
 from mne.channels import make_standard_montage
-import pandas as pd
 from pathlib import Path
-import warnings
 import matplotlib.pyplot as plt
 import seaborn as sns
 import networkx as nx
@@ -32,13 +28,22 @@ class ConsensusMatrix:
     """
     Build consensus connectivity matrices from multiple subjects using Pearson correlation.
     
-    The process:
-    1. Compute per-subject Pearson correlation matrices A(s)
-    2. Sparsify each A(s) → binary B(s) using proportional thresholding
-    3. Compute edge consistency: C_ij = (1/S) * Σ_s B_ij(s)
-    4. Compute representative weights W_ij via Fisher-z conditional mean
-    5. Select edges using C (uniform or distance-dependent)
-    6. Assign weights W_ij to selected edges → final group adjacency G
+    Two consensus methods are supported:
+    
+    1. Direct Fisher-z averaging (recommended, default):
+       - Apply Fisher-z transform to all correlation matrices
+       - Average in z-space across all subjects
+       - Inverse transform to get consensus correlation matrix
+       - Apply proportional thresholding to final consensus
+    
+    2. Betzel-style binarization-based approach:
+       - Sparsify each A(s) → binary B(s) using proportional thresholding
+       - Compute edge consistency: C_ij = (1/S) * Σ_s B_ij(s)
+       - Compute representative weights W_ij via Fisher-z conditional mean
+       - Select edges using C (uniform or distance-dependent)
+       
+    The direct method is preferred as it preserves more information by not
+    discarding sub-threshold correlations during per-subject binarization.
     """
     
     def __init__(self, channel_locations: Optional[np.ndarray] = None):
@@ -60,6 +65,7 @@ class ConsensusMatrix:
         self.adjacency_matrices = []
         self.subject_labels = []
         self.distance_graph = None
+        self._consensus_method = None  # Track which method was used
         
     def load_eeg_data(self, filepath: str) -> np.ndarray:
         """
@@ -229,28 +235,167 @@ class ConsensusMatrix:
         """Apply inverse Fisher z-transformation: r = tanh(z)"""
         return np.tanh(z)
     
+    def compute_direct_consensus(self,
+                                  adjacency_matrices: List[np.ndarray],
+                                  sparsity: Optional[float] = None) -> np.ndarray:
+        """
+        Compute consensus matrix using direct Fisher-z averaging (recommended method).
+        
+        This method directly averages all correlation matrices in Fisher-z space
+        without per-subject binarization, preserving more information.
+        
+        Parameters
+        ----------
+        adjacency_matrices : List[np.ndarray]
+            List of weighted adjacency matrices (correlation matrices), one per subject
+        sparsity : float, optional
+            If provided, apply proportional thresholding to the final consensus matrix.
+            If None, return the full dense consensus matrix.
+            
+        Returns
+        -------
+        consensus : np.ndarray
+            Consensus correlation matrix
+        """
+        if len(adjacency_matrices) == 0:
+            raise ValueError("No matrices provided")
+        
+        n_subjects = len(adjacency_matrices)
+        n_nodes = adjacency_matrices[0].shape[0]
+        
+        # Store adjacency matrices
+        self.adjacency_matrices = adjacency_matrices
+        self._consensus_method = 'direct'
+        
+        logger.info(f"Computing direct Fisher-z consensus from {n_subjects} subjects")
+        
+        # Stack all correlation matrices
+        stack = np.stack(adjacency_matrices, axis=0)
+        
+        # Apply Fisher-z transform to all matrices
+        z_stack = self.fisher_z_transform(stack)
+        
+        # Average in z-space
+        z_mean = np.mean(z_stack, axis=0)
+        
+        # Transform back to correlation space and take absolute value
+        consensus = np.abs(self.fisher_z_inverse(z_mean))
+        
+        # Ensure diagonal is 0 and matrix is symmetric
+        np.fill_diagonal(consensus, 0)
+        consensus = np.maximum(consensus, consensus.T)
+        
+        # Store the full dense consensus
+        self.weight_matrix_full = consensus.copy()
+        
+        # Apply sparsity threshold if requested
+        if sparsity is not None and 0 < sparsity < 1:
+            consensus_thresholded = self.proportional_threshold_weighted(consensus, sparsity)
+            self.consensus_matrix = (consensus_thresholded > 0).astype(float)
+            self.weight_matrix = consensus_thresholded
+            self.average_subject_sparsity = sparsity
+            logger.info(f"Applied sparsity threshold {sparsity:.2%} to consensus matrix")
+        else:
+            # No thresholding - use full consensus
+            self.consensus_matrix = np.ones_like(consensus)
+            np.fill_diagonal(self.consensus_matrix, 0)
+            self.weight_matrix = consensus
+            self.average_subject_sparsity = 1.0
+            logger.info("Returning full dense consensus matrix (no sparsity threshold)")
+        
+        return consensus
+    
+    def proportional_threshold_weighted(self, A: np.ndarray, sparsity: float) -> np.ndarray:
+        """
+        Apply proportional thresholding while preserving weights.
+        Keep top κ fraction of edges with their original weights.
+        
+        Parameters
+        ----------
+        A : np.ndarray
+            Weighted adjacency matrix
+        sparsity : float
+            Fraction of edges to keep (0 < sparsity < 1)
+            
+        Returns
+        -------
+        A_thresh : np.ndarray
+            Thresholded weighted adjacency matrix
+        """
+        n = A.shape[0]
+        # Get upper triangle indices (excluding diagonal)
+        triu_indices = np.triu_indices(n, k=1)
+        
+        # Extract edge weights
+        edge_weights = A[triu_indices]
+        
+        # Calculate number of edges to keep
+        n_edges = len(edge_weights)
+        k_edges = int(np.floor(sparsity * n_edges))
+        
+        if k_edges == 0:
+            logger.warning(f"Sparsity {sparsity} results in 0 edges. Keeping at least 1.")
+            k_edges = 1
+            
+        # Find threshold (k-th largest value)
+        if k_edges < n_edges:
+            threshold = np.sort(edge_weights)[::-1][k_edges]
+        else:
+            threshold = 0  # Keep all edges
+            
+        # Create thresholded matrix preserving weights
+        A_thresh = np.where(A > threshold, A, 0)
+        
+        # Ensure symmetry
+        A_thresh = np.maximum(A_thresh, A_thresh.T)
+        
+        # Ensure diagonal is 0
+        np.fill_diagonal(A_thresh, 0)
+        
+        return A_thresh
+    
     def compute_consensus_and_weights(self, 
                                        adjacency_matrices: List[np.ndarray],
-                                       sparsity: float = 0.15) -> Tuple[np.ndarray, np.ndarray]:
+                                       sparsity: float = 0.15,
+                                       method: str = 'direct') -> Tuple[np.ndarray, np.ndarray]:
         """
         Compute consensus matrix C and weight matrix W from multiple subjects.
-        
-        C_ij = (1/S) * Σ_s B_ij(s)  [fraction of subjects with edge]
-        W_ij = conditional mean of weights where edge exists
         
         Parameters
         ----------
         adjacency_matrices : List[np.ndarray]
             List of weighted adjacency matrices, one per subject
         sparsity : float
-            Sparsity level for binarization
+            Sparsity level for the final graph (0 < sparsity < 1)
+        method : str
+            Consensus computation method:
+            - 'direct': Direct Fisher-z averaging across all correlations (recommended).
+                        Preserves more information by not discarding sub-threshold edges.
+            - 'binarize': Betzel-style per-subject binarization then conditional averaging.
+                          C_ij = fraction of subjects with edge, W_ij = conditional mean.
             
         Returns
         -------
         C : np.ndarray
-            Consensus matrix (fraction of subjects with each edge)
+            Consensus matrix (edge indicators or fraction of subjects with edge)
         W : np.ndarray
-            Weight matrix (average weight where edge exists)
+            Weight matrix (consensus correlation strengths)
+        """
+        if method == 'direct':
+            return self._compute_consensus_direct(adjacency_matrices, sparsity)
+        elif method == 'binarize':
+            return self._compute_consensus_binarize(adjacency_matrices, sparsity)
+        else:
+            raise ValueError(f"Unknown consensus method '{method}'. Use 'direct' or 'binarize'.")
+    
+    def _compute_consensus_direct(self,
+                                   adjacency_matrices: List[np.ndarray],
+                                   sparsity: float) -> Tuple[np.ndarray, np.ndarray]:
+        """
+        Direct Fisher-z consensus (recommended).
+        
+        Averages all correlation matrices in Fisher-z space, then applies
+        proportional thresholding to the consensus result.
         """
         n_subjects = len(adjacency_matrices)
         n_nodes = adjacency_matrices[0].shape[0]
@@ -258,10 +403,70 @@ class ConsensusMatrix:
         # Store adjacency matrices
         self.adjacency_matrices = adjacency_matrices
         self.distance_graph = None
+        self._consensus_method = 'direct'
+        
+        logger.info(f"Computing direct Fisher-z consensus from {n_subjects} matrices")
+        
+        # Stack all correlation matrices
+        adjacency_stack = np.stack(adjacency_matrices, axis=0)
+        
+        # Apply Fisher-z transform to all matrices
+        z_stack = self.fisher_z_transform(adjacency_stack)
+        
+        # Average in z-space
+        z_mean = np.mean(z_stack, axis=0)
+        
+        # Transform back to correlation space and take absolute value
+        consensus_full = np.abs(self.fisher_z_inverse(z_mean))
+        
+        # Ensure diagonal is 0 and matrix is symmetric
+        np.fill_diagonal(consensus_full, 0)
+        consensus_full = np.maximum(consensus_full, consensus_full.T)
+        
+        # Store the full dense consensus
+        self.weight_matrix_full = consensus_full.copy()
+        
+        # Apply sparsity threshold
+        W = self.proportional_threshold_weighted(consensus_full, sparsity)
+        C = (W > 0).astype(float)
+        
+        # Compute average sparsity (matches the requested sparsity)
+        triu_idx = np.triu_indices(n_nodes, k=1)
+        n_possible_edges = max(1, len(triu_idx[0]))
+        n_edges = int(np.sum(W[triu_idx] > 0))
+        self.average_subject_sparsity = n_edges / n_possible_edges
+        
+        # Clear binary matrices since we don't use them in direct method
+        self.binary_matrices = []
+        
+        self.consensus_matrix = C
+        self.weight_matrix = W
+        
+        logger.info(f"Direct consensus: kept {n_edges}/{n_possible_edges} edges "
+                   f"({self.average_subject_sparsity:.2%} sparsity)")
+        
+        return C, W
+    
+    def _compute_consensus_binarize(self,
+                                     adjacency_matrices: List[np.ndarray],
+                                     sparsity: float) -> Tuple[np.ndarray, np.ndarray]:
+        """
+        Betzel-style binarization-based consensus.
+        
+        C_ij = (1/S) * Σ_s B_ij(s)  [fraction of subjects with edge]
+        W_ij = conditional mean of weights where edge exists
+        """
+        n_subjects = len(adjacency_matrices)
+        n_nodes = adjacency_matrices[0].shape[0]
+        
+        # Store adjacency matrices
+        self.adjacency_matrices = adjacency_matrices
+        self.distance_graph = None
+        self._consensus_method = 'binarize'
         adjacency_stack = np.stack(adjacency_matrices, axis=0)
         
         # Step 1: Binarize each subject's matrix
-        logger.info(f"Binarizing {n_subjects} matrices with sparsity={sparsity}")
+        logger.info(f"Binarizing {n_subjects} matrices with sparsity={sparsity} (Betzel-style)")
         self.binary_matrices = []
         for i, A in enumerate(adjacency_matrices):
             B = self.proportional_threshold_exact(A, sparsity)
@@ -954,12 +1159,87 @@ class ConsensusMatrix:
         logger.info(f"Results saved to {output_dir}")
 
 
+def compute_consensus_matrix(corr_matrices: List[np.ndarray], 
+                             sparsity: Optional[float] = None) -> np.ndarray:
+    """
+    Compute consensus matrix from individual correlation matrices.
+    Uses direct Fisher-z averaging for robust mean estimation.
+    
+    This is the recommended simple interface for computing consensus matrices.
+    It directly averages all correlations in Fisher-z space, preserving more
+    information than binarization-based approaches.
+    
+    Parameters
+    ----------
+    corr_matrices : List[np.ndarray]
+        List of correlation matrices (one per subject)
+    sparsity : float, optional
+        If provided, apply proportional thresholding to keep top sparsity 
+        fraction of edges. If None, return the full dense consensus matrix.
+        
+    Returns
+    -------
+    consensus : np.ndarray
+        Consensus correlation matrix
+        
+    Examples
+    --------
+    >>> # Compute full dense consensus
+    >>> consensus = compute_consensus_matrix(subject_matrices)
+    
+    >>> # Compute sparse consensus (keep top 15% of edges)
+    >>> consensus = compute_consensus_matrix(subject_matrices, sparsity=0.15)
+    """
+    if len(corr_matrices) == 0:
+        raise ValueError("No matrices provided")
+    
+    # Stack all correlation matrices
+    stack = np.stack(corr_matrices, axis=0)
+    
+    # Apply Fisher-z transform to all matrices
+    # Clip to avoid inf values
+    stack_clipped = np.clip(stack, -0.999999, 0.999999)
+    z_stack = np.arctanh(stack_clipped)
+    
+    # Average in z-space
+    z_mean = np.mean(z_stack, axis=0)
+    
+    # Transform back to correlation space and take absolute value
+    consensus = np.abs(np.tanh(z_mean))
+    
+    # Ensure diagonal is 0 and matrix is symmetric
+    np.fill_diagonal(consensus, 0)
+    consensus = np.maximum(consensus, consensus.T)
+    
+    # Apply sparsity threshold if requested
+    if sparsity is not None and 0 < sparsity < 1:
+        n = consensus.shape[0]
+        triu_indices = np.triu_indices(n, k=1)
+        edge_weights = consensus[triu_indices]
+        
+        n_edges = len(edge_weights)
+        k_edges = int(np.floor(sparsity * n_edges))
+        k_edges = max(1, k_edges)
+        
+        if k_edges < n_edges:
+            threshold = np.sort(edge_weights)[::-1][k_edges]
+        else:
+            threshold = 0
+            
+        consensus = np.where(consensus > threshold, consensus, 0)
+        consensus = np.maximum(consensus, consensus.T)
+        np.fill_diagonal(consensus, 0)
+    
+    return consensus
+
+
 def process_eeg_files(file_paths: List[str], 
                       group_labels: Optional[List[str]] = None,
                       channel_locations: Optional[np.ndarray] = None,
-                      sparsity_binarize: float = 0.15,
+                      sparsity: float = 0.15,
                       sparsity_final: Optional[Union[float, str]] = "match_subject",
-                      method: str = 'distance',
+                      graph_method: str = 'distance',
+                      consensus_method: str = 'direct',
                       output_dir: str = "./consensus_results") -> Dict:
     """
     Process multiple EEG files to create consensus matrices.
@@ -972,13 +1252,21 @@ def process_eeg_files(file_paths: List[str],
         Group labels for each file (e.g., 'AD', 'HC')
     channel_locations : np.ndarray, optional
         Pre-specified 3D channel coordinates (n_channels x 3)
-    sparsity_binarize : float
-        Sparsity for initial binarization
+    sparsity : float
+        Sparsity level for the consensus matrix (fraction of edges to keep, 0 < sparsity < 1)
     sparsity_final : float, str, or None, optional
-        Target sparsity for final graph. Use a float in (0,1], "match_subject" to mirror
-        the average subject sparsity after binarization, or None to keep every qualifying edge.
-    method : str
-        'distance' for distance-dependent or 'uniform' for baseline
+        Target sparsity for final graph when using distance-dependent selection.
+        Use a float in (0,1], "match_subject" to mirror the consensus sparsity, 
+        or None to keep every qualifying edge.
+    graph_method : str
+        Graph construction method:
+        - 'distance': Distance-dependent edge selection (Betzel-style bins)
+        - 'uniform': Uniform edge selection based on consensus values
+    consensus_method : str
+        Consensus computation method:
+        - 'direct': Direct Fisher-z averaging across all correlations (recommended).
+                    Preserves more information by averaging all correlations.
+        - 'binarize': Betzel-style per-subject binarization then conditional averaging.
     output_dir : str
         Directory to save results
         
@@ -1018,11 +1306,14 @@ def process_eeg_files(file_paths: List[str],
     logger.info(f"Successfully loaded {len(adjacency_matrices)} files")
     
     # Compute consensus matrix and weights
-    C, W = consensus_builder.compute_consensus_and_weights(adjacency_matrices, 
-                                                             sparsity=sparsity_binarize)
+    C, W = consensus_builder.compute_consensus_and_weights(
+        adjacency_matrices, 
+        sparsity=sparsity,
+        method=consensus_method
+    )
     
     # Build final group graph
-    if method == 'distance':
+    if graph_method == 'distance':
         if consensus_builder.channel_locations is None:
             raise ValueError("Distance-dependent consensus requested but channel locations are missing.")
         G = consensus_builder.distance_dependent_consensus(
@@ -1034,10 +1325,16 @@ def process_eeg_files(file_paths: List[str],
     
     # Summarize properties of the final graph
     group_name = Path(output_dir).name
+    method_desc = f"{consensus_method} Fisher-z consensus"
+    if graph_method == 'distance':
+        method_desc += " with distance-dependent edge selection (Betzel-style bins)"
+    else:
+        method_desc += " with uniform edge selection"
+    
     graph_summary = consensus_builder.summarize_distance_graph(
         group_name=group_name,
         output_dir=str(output_path),
-        method_desc="distance-dependent consensus (Betzel-style bins)" if method == 'distance' else "uniform consensus baseline",
+        method_desc=method_desc,
         graph=G
     )
     
@@ -1136,9 +1433,10 @@ if __name__ == "__main__":
     
     results = process_eeg_files(
         file_paths=files,
-        sparsity_binarize=0.15,
-        sparsity_final=0.10,
-        method='distance',
+        sparsity=0.15,              # Sparsity for final consensus graph
+        sparsity_final=0.10,        # Optional secondary sparsity for distance-dependent selection
+        graph_method='distance',     # 'distance' or 'uniform'
+        consensus_method='direct',   # 'direct' (recommended) or 'binarize' (Betzel-style)
         output_dir="./consensus_results/ALL_Files"
     )
     
