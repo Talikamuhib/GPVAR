@@ -1,18 +1,18 @@
 """
-LTI vs Time-Varying GP-VAR Analysis - GROUP COMPARISON (AD vs HC)
-=================================================================
-Compares:
-1. AD Time-Varying vs HC Time-Varying
-2. AD LTI vs HC LTI
+LTI vs Time-Varying GP-VAR Analysis: AD vs HC Comparison
+=======================================================
+Analyzes AD and HC subjects, comparing LTI and TV models between groups.
 
 Features:
-- Processes all subjects in both groups
-- Robust error handling per subject
-- Group-level statistical comparisons
+- Individual subject analysis with model selection
+- Model selection heatmaps (BIC grid) for each subject
+- Model selection results saved as CSV
+- AD vs HC comparison plots for both LTI and TV models
+- Statistical comparisons between groups
 - Publication-quality visualizations
+- Graph frequency indexed 1-N with eigenvalue values on a secondary axis
 """
 
-import json
 import numpy as np
 import pandas as pd
 from pathlib import Path
@@ -22,11 +22,6 @@ warnings.filterwarnings('ignore')
 
 import mne
 from scipy import linalg, stats, signal
-from statsmodels.stats.multitest import multipletests
-from statsmodels.tsa.api import VAR
-from sklearn.model_selection import StratifiedKFold, cross_val_score
-from sklearn.linear_model import LogisticRegression
-from sklearn.preprocessing import StandardScaler
 import matplotlib.pyplot as plt
 from matplotlib.gridspec import GridSpec
 import seaborn as sns
@@ -193,7 +188,6 @@ MIN_WINDOWS = 5
 # Output
 OUT_DIR = Path("./group_comparison_lti_tv_analysis")
 OUT_DIR.mkdir(exist_ok=True, parents=True)
-CLINICAL_SCORES_PATH = OUT_DIR / "clinical_scores.csv"
 
 # ============================================================================
 # Helper Functions (from single-subject script)
@@ -259,6 +253,19 @@ def load_consensus_laplacian(filepath: str) -> np.ndarray:
 
     L_norm = (L_norm + L_norm.T) / 2.0
     return L_norm
+
+
+def add_eigenvalue_secondary_axis(ax, lambdas: np.ndarray, n_ticks: int = 6):
+    """
+    Add a secondary x-axis showing eigenvalue values corresponding to graph frequency indices.
+    """
+    ax2 = ax.twiny()
+    ax2.set_xlim(ax.get_xlim())
+    tick_indices = np.linspace(0, len(lambdas) - 1, n_ticks, dtype=int)
+    ax2.set_xticks(tick_indices)
+    ax2.set_xticklabels([f"{lambdas[i]:.2f}" for i in tick_indices])
+    ax2.set_xlabel("Graph Frequency λ (eigenvalue of normalized Laplacian)", fontsize=10, fontweight="bold")
+    return ax2
 
 # ============================================================================
 # GP-VAR Model Class
@@ -1594,321 +1601,6 @@ def plot_graph_frequency_responses(ad_results: List[Dict], hc_results: List[Dict
     plt.close()
     print(f"  Saved: {savepath} (300 DPI)")
 
-
-def add_eigenvalue_secondary_axis(ax, lambdas: np.ndarray, n_ticks: int = 6):
-    """
-    Add a secondary x-axis that reports eigenvalue values corresponding to graph indices.
-    """
-    ax2 = ax.twiny()
-    ax2.set_xlim(ax.get_xlim())
-    tick_indices = np.linspace(0, len(lambdas) - 1, n_ticks, dtype=int)
-    ax2.set_xticks(tick_indices)
-    ax2.set_xticklabels([f"{lambdas[i]:.2f}" for i in tick_indices])
-    ax2.set_xlabel('Graph Frequency λ', fontweight='bold')
-    return ax2
-
-# ============================================================================
-# Advanced Statistical Analyses
-# ============================================================================
-
-def compute_statistical_map(ad_results: List[Dict], hc_results: List[Dict],
-                            model_key: str = 'G_lti') -> Dict[str, np.ndarray]:
-    """
-    Compute t-statistics, FDR-corrected p-values, and effect sizes across
-    the (ω, λ) transfer function surface.
-    """
-    G_ad = np.array([r[model_key] for r in ad_results])
-    G_hc = np.array([r[model_key] for r in hc_results])
-
-    n_freqs, n_lambdas = G_ad.shape[1], G_ad.shape[2]
-    t_map = np.zeros((n_freqs, n_lambdas))
-    p_map = np.ones((n_freqs, n_lambdas))
-    effect_map = np.zeros((n_freqs, n_lambdas))
-
-    for i in range(n_freqs):
-        for j in range(n_lambdas):
-            ad_vals = G_ad[:, i, j]
-            hc_vals = G_hc[:, i, j]
-            t_stat, p_val = stats.ttest_ind(ad_vals, hc_vals, equal_var=False)
-            t_map[i, j] = t_stat
-            p_map[i, j] = p_val
-            pooled_std = np.sqrt((ad_vals.std(ddof=1) ** 2 + hc_vals.std(ddof=1) ** 2) / 2)
-            effect_map[i, j] = (ad_vals.mean() - hc_vals.mean()) / (pooled_std + 1e-10)
-
-    p_corrected = multipletests(p_map.flatten(), method='fdr_bh')[1].reshape(p_map.shape)
-    significant_mask = p_corrected < 0.05
-
-    return {
-        't_map': t_map,
-        'p_map': p_map,
-        'p_corrected': p_corrected,
-        'effect_size': effect_map,
-        'significant_mask': significant_mask,
-        'n_significant': int(significant_mask.sum()),
-        'percent_significant': float(significant_mask.mean() * 100.0)
-    }
-
-
-def analyze_by_band_and_mode(ad_results: List[Dict], hc_results: List[Dict]) -> pd.DataFrame:
-    """
-    Break down group differences by canonical frequency band and graph-mode tertiles.
-    """
-    G_ad = np.array([r['G_lti'] for r in ad_results])
-    G_hc = np.array([r['G_lti'] for r in hc_results])
-    freqs = ad_results[0]['freqs_hz']
-    lambdas = ad_results[0]['lambdas']
-
-    bands = {
-        'delta': (0.5, 4.0),
-        'theta': (4.0, 8.0),
-        'alpha': (8.0, 13.0),
-        'beta': (13.0, 30.0),
-        'gamma': (30.0, 45.0)
-    }
-    n_modes = len(lambdas)
-    tertile = n_modes // 3
-    mode_groups = {
-        'low_modes': (0, tertile),
-        'mid_modes': (tertile, 2 * tertile),
-        'high_modes': (2 * tertile, n_modes)
-    }
-
-    rows = []
-    for band_name, (f_low, f_high) in bands.items():
-        freq_mask = (freqs >= f_low) & (freqs <= f_high)
-        if not freq_mask.any():
-            continue
-        for mode_name, (m_low, m_high) in mode_groups.items():
-            ad_region = G_ad[:, freq_mask, m_low:m_high].mean(axis=(1, 2))
-            hc_region = G_hc[:, freq_mask, m_low:m_high].mean(axis=(1, 2))
-            t_stat, p_val = stats.ttest_ind(ad_region, hc_region, equal_var=False)
-            pooled_std = np.sqrt((ad_region.std(ddof=1) ** 2 + hc_region.std(ddof=1) ** 2) / 2)
-            d_val = (ad_region.mean() - hc_region.mean()) / (pooled_std + 1e-10)
-            rows.append({
-                'band': band_name,
-                'mode_group': mode_name,
-                'AD_mean': ad_region.mean(),
-                'HC_mean': hc_region.mean(),
-                't_stat': t_stat,
-                'p_value': p_val,
-                'cohens_d': d_val,
-                'direction': 'AD > HC' if d_val > 0 else 'AD < HC'
-            })
-
-    return pd.DataFrame(rows)
-
-
-def interpret_graph_modes(L_norm: np.ndarray, ch_names: Optional[List[str]] = None,
-                          n_modes_to_report: int = 6) -> List[Dict]:
-    """
-    Provide textual summaries for selected graph eigenmodes.
-    """
-    eigenvalues, eigenvectors = np.linalg.eigh(L_norm)
-    n_nodes = L_norm.shape[0]
-    if ch_names is None or len(ch_names) != n_nodes:
-        ch_names = [f"Ch{i+1}" for i in range(n_nodes)]
-
-    mode_indices = [0, 1, 2, n_modes_to_report // 2, -2, -1]
-    summaries = []
-    for idx in mode_indices:
-        eigvec = eigenvectors[:, idx]
-        eigval = float(eigenvalues[idx])
-        top_idx = np.argsort(np.abs(eigvec))[-5:]
-        pattern = 'global' if eigval < 0.5 else ('local' if eigval > 1.5 else 'intermediate')
-        summaries.append({
-            'mode_index': int(idx),
-            'eigenvalue': eigval,
-            'pattern': pattern,
-            'top_channels': [ch_names[i] for i in top_idx]
-        })
-    return summaries
-
-
-def create_topomap_for_modes(L_norm: np.ndarray, ch_names: List[str], save_path: Path,
-                             montage: str = 'standard_1020'):
-    """
-    Create topographic maps for representative eigenmodes.
-    """
-    eigenvalues, eigenvectors = np.linalg.eigh(L_norm)
-    info = mne.create_info(ch_names, sfreq=TARGET_SFREQ, ch_types='eeg')
-    info.set_montage(montage)
-
-    fig, axes = plt.subplots(2, 4, figsize=(18, 8))
-    modes_to_plot = [0, 1, 2, 3, -4, -3, -2, -1]
-    for ax, mode_idx in zip(axes.flatten(), modes_to_plot):
-        mne.viz.plot_topomap(eigenvectors[:, mode_idx], info, axes=ax, show=False)
-        ax.set_title(f"Mode {mode_idx}\nλ={eigenvalues[mode_idx]:.2f}")
-
-    plt.suptitle('Graph Eigenmodes: Low λ (Global) → High λ (Local)', fontsize=14, fontweight='bold')
-    plt.tight_layout()
-    plt.savefig(save_path, dpi=300, bbox_inches='tight', facecolor='white')
-    plt.close()
-
-
-def fit_standard_var(X: np.ndarray, P: int):
-    """Fit an unconstrained VAR model for comparison."""
-    model = VAR(X.T)
-    return model.fit(P)
-
-
-def compare_models(X_std: np.ndarray, L_norm: np.ndarray, P: int, K: int) -> Dict:
-    """
-    Compare GP-VAR and standard VAR on the same subject data.
-    """
-    gpvar = GPVAR_SharedH(P=P, K=K, L_norm=L_norm)
-    gpvar.fit(X_std)
-    gp_metrics = gpvar.evaluate(X_std)
-
-    var_results = fit_standard_var(X_std, P)
-    var_r2 = 1.0 - var_results.sigma_u.diagonal().sum() / (X_std.var(axis=1).sum() + 1e-10)
-
-    n_params_gpvar = P * (K + 1)
-    n_params_var = P * (X_std.shape[0] ** 2)
-
-    return {
-        'gpvar_R2': gp_metrics['R2'],
-        'gpvar_BIC': gp_metrics['BIC'],
-        'gpvar_n_params': n_params_gpvar,
-        'var_R2': var_r2,
-        'var_BIC': var_results.bic,
-        'var_n_params': n_params_var,
-        'param_reduction': n_params_var / (n_params_gpvar + 1e-10)
-    }
-
-
-def extract_features(results: List[Dict], feature_type: str = 'transfer_function') -> np.ndarray:
-    """
-    Build feature vectors for each subject for downstream classification.
-    """
-    feature_vectors = []
-    for r in results:
-        if feature_type == 'transfer_function':
-            G = r['G_lti']
-            freqs = r['freqs_hz']
-            vec = [
-                G.mean(),
-                G.std(),
-                G.max(),
-                G[:, :G.shape[1] // 3].mean(),
-                G[:, -G.shape[1] // 3:].mean(),
-            ]
-            for f_low, f_high in [(0.5, 4), (4, 8), (8, 13), (13, 30)]:
-                mask = (freqs >= f_low) & (freqs <= f_high)
-                if mask.any():
-                    vec.append(G[mask, :].mean())
-                else:
-                    vec.append(0.0)
-        elif feature_type == 'tv_variability':
-            vec = [
-                r['mean_msd'],
-                r['mean_cv'],
-                r['tv_R2_mean'],
-                r['tv_R2_std'],
-            ]
-        else:
-            raise ValueError(f"Unknown feature_type: {feature_type}")
-        feature_vectors.append(vec)
-    return np.array(feature_vectors)
-
-
-def classification_analysis(ad_results: List[Dict], hc_results: List[Dict]) -> pd.DataFrame:
-    """
-    Evaluate how well different GP-VAR feature sets classify AD vs HC.
-    """
-    feature_specs = {
-        'GSP_transfer_function': 'transfer_function',
-        'GSP_tv_variability': 'tv_variability'
-    }
-    rows = []
-    for name, feat_type in feature_specs.items():
-        X_ad = extract_features(ad_results, feat_type)
-        X_hc = extract_features(hc_results, feat_type)
-        X = np.vstack([X_ad, X_hc])
-        y = np.array([1] * len(X_ad) + [0] * len(X_hc))
-
-        scaler = StandardScaler()
-        X_scaled = scaler.fit_transform(X)
-
-        clf = LogisticRegression(max_iter=200, solver='lbfgs')
-        cv = StratifiedKFold(n_splits=5, shuffle=True, random_state=42)
-        scores = cross_val_score(clf, X_scaled, y, cv=cv, scoring='roc_auc')
-
-        rows.append({
-            'feature_set': name,
-            'n_features': X.shape[1],
-            'AUC_mean': scores.mean(),
-            'AUC_std': scores.std()
-        })
-    return pd.DataFrame(rows)
-
-
-def correlate_with_clinical(results: List[Dict], clinical_scores: Dict[str, float]) -> pd.DataFrame:
-    """
-    Correlate graph-spectral metrics with clinical scores (e.g., MMSE).
-    """
-    feature_funcs = {
-        'mean_gain': lambda r: r['G_lti'].mean(),
-        'low_mode_gain': lambda r: r['G_lti'][:, :10].mean(),
-        'high_mode_gain': lambda r: r['G_lti'][:, -10:].mean(),
-        'tv_variability': lambda r: r['mean_cv'],
-        'theta_gain': lambda r: r['G_lti'][(r['freqs_hz'] >= 4) & (r['freqs_hz'] <= 8), :].mean(),
-        'alpha_gain': lambda r: r['G_lti'][(r['freqs_hz'] >= 8) & (r['freqs_hz'] <= 13), :].mean(),
-    }
-
-    rows = []
-    for feature_name, func in feature_funcs.items():
-        feature_vals = []
-        scores = []
-        for r in results:
-            sid = r['subject_id']
-            if sid in clinical_scores:
-                feature_vals.append(func(r))
-                scores.append(clinical_scores[sid])
-        if len(feature_vals) > 5:
-            pearson_r, pearson_p = stats.pearsonr(feature_vals, scores)
-            spearman_rho, spearman_p = stats.spearmanr(feature_vals, scores)
-            rows.append({
-                'feature': feature_name,
-                'pearson_r': pearson_r,
-                'pearson_p': pearson_p,
-                'spearman_rho': spearman_rho,
-                'spearman_p': spearman_p,
-                'n_subjects': len(feature_vals)
-            })
-    return pd.DataFrame(rows)
-
-
-def analyze_dynamic_stability(ad_results: List[Dict], hc_results: List[Dict]) -> Tuple[pd.DataFrame, Dict]:
-    """
-    Compare temporal variability across graph modes between groups.
-    """
-    lambdas = ad_results[0]['lambdas']
-    n_modes = len(lambdas)
-    rows = []
-
-    for mode_idx in range(n_modes):
-        ad_var = [r['G_tv_std'][:, mode_idx].mean() for r in ad_results]
-        hc_var = [r['G_tv_std'][:, mode_idx].mean() for r in hc_results]
-        t_stat, p_val = stats.ttest_ind(ad_var, hc_var, equal_var=False)
-        rows.append({
-            'mode_index': mode_idx,
-            'eigenvalue': lambdas[mode_idx],
-            'AD_variability': np.mean(ad_var),
-            'HC_variability': np.mean(hc_var),
-            't_stat': t_stat,
-            'p_value': p_val,
-            'AD_more_variable': np.mean(ad_var) > np.mean(hc_var)
-        })
-
-    df = pd.DataFrame(rows)
-    summary = {
-        'AD_more_variable_modes': int((df['AD_variability'] > df['HC_variability']).sum()),
-        'n_modes': n_modes,
-        'n_significant_modes': int((df['p_value'] < 0.05).sum()),
-        'most_different_mode': int(df.loc[df['t_stat'].abs().idxmax(), 'mode_index'])
-    }
-    return df, summary
-
 # ============================================================================
 # Visualization
 # ============================================================================
@@ -2104,6 +1796,270 @@ def plot_group_comparison(ad_results: List[Dict], hc_results: List[Dict],
     plt.close()
     print(f"  Saved: {savepath2} (300 DPI)")
 
+
+def plot_ad_vs_hc_comparison(ad_results: List[Dict], hc_results: List[Dict], save_dir: Path):
+    """
+    Create comprehensive AD vs HC comparison plots for LTI and TV models with graph-frequency indexing.
+    """
+    print("\nCreating AD vs HC comparison plots...")
+    if len(ad_results) == 0 or len(hc_results) == 0:
+        print("  WARNING: Not enough subjects for comparison")
+        return
+
+    freqs_hz = ad_results[0]['freqs_hz']
+    lambdas = ad_results[0]['lambdas']
+    n_lambdas = len(lambdas)
+    graph_freq_indices = np.arange(n_lambdas)
+    omegas = ad_results[0]['omegas']
+
+    ad_G_lti_all = np.array([r['G_lti'] for r in ad_results])
+    hc_G_lti_all = np.array([r['G_lti'] for r in hc_results])
+    ad_G_tv_all = np.array([r['G_tv_mean'] for r in ad_results])
+    hc_G_tv_all = np.array([r['G_tv_mean'] for r in hc_results])
+
+    ad_G_lti_mean = ad_G_lti_all.mean(axis=0)
+    hc_G_lti_mean = hc_G_lti_all.mean(axis=0)
+    ad_G_tv_mean = ad_G_tv_all.mean(axis=0)
+    hc_G_tv_mean = hc_G_tv_all.mean(axis=0)
+
+    ad_G_lti_std = ad_G_lti_all.std(axis=0)
+    hc_G_lti_std = hc_G_lti_all.std(axis=0)
+    ad_G_tv_std = ad_G_tv_all.std(axis=0)
+    hc_G_tv_std = hc_G_tv_all.std(axis=0)
+
+    color_ad = '#E74C3C'
+    color_hc = '#3498DB'
+
+    fig1 = plt.figure(figsize=(20, 12))
+    gs = GridSpec(3, 4, figure=fig1, hspace=0.35, wspace=0.3)
+
+    ax1 = fig1.add_subplot(gs[0, 0])
+    im1 = ax1.imshow(ad_G_lti_mean, aspect='auto', origin='lower', cmap='hot',
+                     extent=[0, n_lambdas - 1, 0, freqs_hz.max()])
+    ax1.set_title('AD LTI |G(ω,λ)|', fontsize=12, fontweight='bold')
+    ax1.set_xlabel('Graph Frequency Index')
+    ax1.set_ylabel('f (Hz)')
+    plt.colorbar(im1, ax=ax1, fraction=0.046, pad=0.04)
+
+    ax2 = fig1.add_subplot(gs[0, 1])
+    im2 = ax2.imshow(hc_G_lti_mean, aspect='auto', origin='lower', cmap='hot',
+                     extent=[0, n_lambdas - 1, 0, freqs_hz.max()])
+    ax2.set_title('HC LTI |G(ω,λ)|', fontsize=12, fontweight='bold')
+    ax2.set_xlabel('Graph Frequency Index')
+    ax2.set_ylabel('f (Hz)')
+    plt.colorbar(im2, ax=ax2, fraction=0.046, pad=0.04)
+
+    ax3 = fig1.add_subplot(gs[0, 2])
+    diff_lti = ad_G_lti_mean - hc_G_lti_mean
+    vmax_lti = np.abs(diff_lti).max()
+    im3 = ax3.imshow(diff_lti, aspect='auto', origin='lower', cmap='RdBu_r',
+                     extent=[0, n_lambdas - 1, 0, freqs_hz.max()],
+                     vmin=-vmax_lti, vmax=vmax_lti)
+    ax3.set_title('LTI Difference (AD - HC)', fontsize=12, fontweight='bold')
+    ax3.set_xlabel('Graph Frequency Index')
+    ax3.set_ylabel('f (Hz)')
+    plt.colorbar(im3, ax=ax3, fraction=0.046, pad=0.04)
+
+    ax4 = fig1.add_subplot(gs[1, 0])
+    im4 = ax4.imshow(ad_G_tv_mean, aspect='auto', origin='lower', cmap='hot',
+                     extent=[0, n_lambdas - 1, 0, freqs_hz.max()])
+    ax4.set_title('AD TV |G(ω,λ)|', fontsize=12, fontweight='bold')
+    ax4.set_xlabel('Graph Frequency Index')
+    ax4.set_ylabel('f (Hz)')
+    plt.colorbar(im4, ax=ax4, fraction=0.046, pad=0.04)
+
+    ax5 = fig1.add_subplot(gs[1, 1])
+    im5 = ax5.imshow(hc_G_tv_mean, aspect='auto', origin='lower', cmap='hot',
+                     extent=[0, n_lambdas - 1, 0, freqs_hz.max()])
+    ax5.set_title('HC TV |G(ω,λ)|', fontsize=12, fontweight='bold')
+    ax5.set_xlabel('Graph Frequency Index')
+    ax5.set_ylabel('f (Hz)')
+    plt.colorbar(im5, ax=ax5, fraction=0.046, pad=0.04)
+
+    ax6 = fig1.add_subplot(gs[1, 2])
+    diff_tv = ad_G_tv_mean - hc_G_tv_mean
+    vmax_tv = np.abs(diff_tv).max()
+    im6 = ax6.imshow(diff_tv, aspect='auto', origin='lower', cmap='RdBu_r',
+                     extent=[0, n_lambdas - 1, 0, freqs_hz.max()],
+                     vmin=-vmax_tv, vmax=vmax_tv)
+    ax6.set_title('TV Difference (AD - HC)', fontsize=12, fontweight='bold')
+    ax6.set_xlabel('Graph Frequency Index')
+    ax6.set_ylabel('f (Hz)')
+    plt.colorbar(im6, ax=ax6, fraction=0.046, pad=0.04)
+
+    ax7 = fig1.add_subplot(gs[0, 3])
+    ad_var = ad_G_lti_all.var(axis=0)
+    im7 = ax7.imshow(ad_var, aspect='auto', origin='lower', cmap='YlOrRd',
+                     extent=[0, n_lambdas - 1, 0, freqs_hz.max()])
+    ax7.set_title('AD LTI Variance', fontsize=11, fontweight='bold')
+    ax7.set_xlabel('Graph Frequency Index')
+    ax7.set_ylabel('f (Hz)')
+    plt.colorbar(im7, ax=ax7, fraction=0.046, pad=0.04)
+
+    ax8 = fig1.add_subplot(gs[1, 3])
+    hc_var = hc_G_lti_all.var(axis=0)
+    im8 = ax8.imshow(hc_var, aspect='auto', origin='lower', cmap='YlOrRd',
+                     extent=[0, n_lambdas - 1, 0, freqs_hz.max()])
+    ax8.set_title('HC LTI Variance', fontsize=11, fontweight='bold')
+    ax8.set_xlabel('Graph Frequency Index')
+    ax8.set_ylabel('f (Hz)')
+    plt.colorbar(im8, ax=ax8, fraction=0.046, pad=0.04)
+
+    ax9 = fig1.add_subplot(gs[2, :2])
+    ad_lti_freq = ad_G_lti_mean.mean(axis=1)
+    hc_lti_freq = hc_G_lti_mean.mean(axis=1)
+    ad_tv_freq = ad_G_tv_mean.mean(axis=1)
+    hc_tv_freq = hc_G_tv_mean.mean(axis=1)
+    ax9.plot(freqs_hz, ad_lti_freq, color=color_ad, linewidth=2.5, label='AD LTI')
+    ax9.plot(freqs_hz, hc_lti_freq, color=color_hc, linewidth=2.5, label='HC LTI')
+    ax9.plot(freqs_hz, ad_tv_freq, '--', color=color_ad, linewidth=2.5, label='AD TV')
+    ax9.plot(freqs_hz, hc_tv_freq, '--', color=color_hc, linewidth=2.5, label='HC TV')
+    ax9.set_xlabel('Frequency (Hz)', fontsize=12, fontweight='bold')
+    ax9.set_ylabel('Mode-Averaged |G|', fontsize=12, fontweight='bold')
+    ax9.set_title('Mode-Averaged Frequency Response', fontsize=12, fontweight='bold')
+    ax9.legend(ncol=2, fontsize=10)
+    ax9.grid(True, alpha=0.3)
+
+    ax10 = fig1.add_subplot(gs[2, 2:])
+    ad_lti_mode = ad_G_lti_mean.mean(axis=0)
+    hc_lti_mode = hc_G_lti_mean.mean(axis=0)
+    ad_tv_mode = ad_G_tv_mean.mean(axis=0)
+    hc_tv_mode = hc_G_tv_mean.mean(axis=0)
+    ax10.plot(graph_freq_indices, ad_lti_mode, color=color_ad, linewidth=2.5, label='AD LTI')
+    ax10.plot(graph_freq_indices, hc_lti_mode, color=color_hc, linewidth=2.5, label='HC LTI')
+    ax10.plot(graph_freq_indices, ad_tv_mode, '--', color=color_ad, linewidth=2.5, label='AD TV')
+    ax10.plot(graph_freq_indices, hc_tv_mode, '--', color=color_hc, linewidth=2.5, label='HC TV')
+    ax10.set_xlabel('Graph Frequency Index', fontsize=12, fontweight='bold')
+    ax10.set_ylabel('Frequency-Averaged |G|', fontsize=12, fontweight='bold')
+    ax10.set_title('Frequency-Averaged Graph Mode Response', fontsize=12, fontweight='bold')
+    ax10.legend(ncol=2, fontsize=10)
+    ax10.grid(True, alpha=0.3)
+    add_eigenvalue_secondary_axis(ax10, lambdas, n_ticks=8)
+
+    plt.suptitle('AD vs HC: Transfer Function Comparison (LTI and TV)', fontsize=16, fontweight='bold')
+    plt.tight_layout()
+    savepath1 = save_dir / 'ad_vs_hc_transfer_functions.png'
+    plt.savefig(savepath1, dpi=300, bbox_inches='tight', facecolor='white')
+    plt.close()
+    print(f"  Saved: {savepath1}")
+
+    bands = {'Delta': (0.5, 4), 'Theta': (4, 8), 'Alpha': (8, 13), 'Beta': (13, 30), 'Gamma': (30, 40)}
+    band_colors = {'Delta': '#E8E8E8', 'Theta': '#D5E5F5', 'Alpha': '#D5F5E5', 'Beta': '#FFF8DC', 'Gamma': '#FFE5E5'}
+
+    fig2, axes = plt.subplots(2, 2, figsize=(16, 12))
+
+    ax = axes[0, 0]
+    for band_name, (f_low, f_high) in bands.items():
+        ax.axvspan(f_low, f_high, alpha=0.15, color=band_colors[band_name])
+    ad_lti_freq_all = np.array([r['G_lti'].mean(axis=1) for r in ad_results])
+    hc_lti_freq_all = np.array([r['G_lti'].mean(axis=1) for r in hc_results])
+    ad_mean_freq = ad_lti_freq_all.mean(axis=0)
+    hc_mean_freq = hc_lti_freq_all.mean(axis=0)
+    ad_std_freq = ad_lti_freq_all.std(axis=0)
+    hc_std_freq = hc_lti_freq_all.std(axis=0)
+    ax.plot(freqs_hz, ad_mean_freq, color=color_ad, linewidth=3, label=f'AD (n={len(ad_results)})')
+    ax.fill_between(freqs_hz, ad_mean_freq - ad_std_freq, ad_mean_freq + ad_std_freq, color=color_ad, alpha=0.2)
+    ax.plot(freqs_hz, hc_mean_freq, color=color_hc, linewidth=3, label=f'HC (n={len(hc_results)})')
+    ax.fill_between(freqs_hz, hc_mean_freq - hc_std_freq, hc_mean_freq + hc_std_freq, color=color_hc, alpha=0.2)
+    ax.set_xlabel('Frequency (Hz)', fontsize=12, fontweight='bold')
+    ax.set_ylabel('Mode-Averaged |G|', fontsize=12, fontweight='bold')
+    ax.set_title('(A) LTI: Mode-Averaged Frequency Response', fontsize=13, fontweight='bold')
+    ax.legend(fontsize=10)
+    ax.grid(True, alpha=0.3)
+
+    ax = axes[0, 1]
+    for band_name, (f_low, f_high) in bands.items():
+        ax.axvspan(f_low, f_high, alpha=0.15, color=band_colors[band_name])
+    ad_tv_freq_all = np.array([r['G_tv_mean'].mean(axis=1) for r in ad_results])
+    hc_tv_freq_all = np.array([r['G_tv_mean'].mean(axis=1) for r in hc_results])
+    ad_tv_mean_freq = ad_tv_freq_all.mean(axis=0)
+    hc_tv_mean_freq = hc_tv_freq_all.mean(axis=0)
+    ad_tv_std_freq = ad_tv_freq_all.std(axis=0)
+    hc_tv_std_freq = hc_tv_freq_all.std(axis=0)
+    ax.plot(freqs_hz, ad_tv_mean_freq, '--', color=color_ad, linewidth=3, label=f'AD (n={len(ad_results)})')
+    ax.fill_between(freqs_hz, ad_tv_mean_freq - ad_tv_std_freq, ad_tv_mean_freq + ad_tv_std_freq, color=color_ad, alpha=0.2)
+    ax.plot(freqs_hz, hc_tv_mean_freq, '--', color=color_hc, linewidth=3, label=f'HC (n={len(hc_results)})')
+    ax.fill_between(freqs_hz, hc_tv_mean_freq - hc_tv_std_freq, hc_tv_mean_freq + hc_tv_std_freq, color=color_hc, alpha=0.2)
+    ax.set_xlabel('Frequency (Hz)', fontsize=12, fontweight='bold')
+    ax.set_ylabel('Mode-Averaged |G|', fontsize=12, fontweight='bold')
+    ax.set_title('(B) TV: Mode-Averaged Frequency Response', fontsize=13, fontweight='bold')
+    ax.legend(fontsize=10)
+    ax.grid(True, alpha=0.3)
+
+    ax = axes[1, 0]
+    ad_lti_mode_all = np.array([r['G_lti'].mean(axis=0) for r in ad_results])
+    hc_lti_mode_all = np.array([r['G_lti'].mean(axis=0) for r in hc_results])
+    ad_mean_mode = ad_lti_mode_all.mean(axis=0)
+    hc_mean_mode = hc_lti_mode_all.mean(axis=0)
+    ad_std_mode = ad_lti_mode_all.std(axis=0)
+    hc_std_mode = hc_lti_mode_all.std(axis=0)
+    ax.plot(graph_freq_indices, ad_mean_mode, color=color_ad, linewidth=3, label=f'AD (n={len(ad_results)})')
+    ax.fill_between(graph_freq_indices, ad_mean_mode - ad_std_mode, ad_mean_mode + ad_std_mode, color=color_ad, alpha=0.2)
+    ax.plot(graph_freq_indices, hc_mean_mode, color=color_hc, linewidth=3, label=f'HC (n={len(hc_results)})')
+    ax.fill_between(graph_freq_indices, hc_mean_mode - hc_std_mode, hc_mean_mode + hc_std_mode, color=color_hc, alpha=0.2)
+    ax.set_xlabel('Graph Frequency Index', fontsize=12, fontweight='bold')
+    ax.set_ylabel('Frequency-Averaged |G|', fontsize=12, fontweight='bold')
+    ax.set_title('(C) LTI: Graph Mode Response', fontsize=13, fontweight='bold')
+    ax.legend(fontsize=10)
+    ax.grid(True, alpha=0.3)
+    add_eigenvalue_secondary_axis(ax, lambdas, n_ticks=6)
+
+    ax = axes[1, 1]
+    ad_tv_mode_all = np.array([r['G_tv_mean'].mean(axis=0) for r in ad_results])
+    hc_tv_mode_all = np.array([r['G_tv_mean'].mean(axis=0) for r in hc_results])
+    ad_tv_mean_mode = ad_tv_mode_all.mean(axis=0)
+    hc_tv_mean_mode = hc_tv_mode_all.mean(axis=0)
+    ad_tv_std_mode = ad_tv_mode_all.std(axis=0)
+    hc_tv_std_mode = hc_tv_mode_all.std(axis=0)
+    ax.plot(graph_freq_indices, ad_tv_mean_mode, '--', color=color_ad, linewidth=3, label=f'AD (n={len(ad_results)})')
+    ax.fill_between(graph_freq_indices, ad_tv_mean_mode - ad_tv_std_mode, ad_tv_mean_mode + ad_tv_std_mode, color=color_ad, alpha=0.2)
+    ax.plot(graph_freq_indices, hc_tv_mean_mode, '--', color=color_hc, linewidth=3, label=f'HC (n={len(hc_results)})')
+    ax.fill_between(graph_freq_indices, hc_tv_mean_mode - hc_tv_std_mode, hc_tv_mean_mode + hc_tv_std_mode, color=color_hc, alpha=0.2)
+    ax.set_xlabel('Graph Frequency Index', fontsize=12, fontweight='bold')
+    ax.set_ylabel('Frequency-Averaged |G|', fontsize=12, fontweight='bold')
+    ax.set_title('(D) TV: Graph Mode Response', fontsize=13, fontweight='bold')
+    ax.legend(fontsize=10)
+    ax.grid(True, alpha=0.3)
+    add_eigenvalue_secondary_axis(ax, lambdas, n_ticks=6)
+
+    plt.suptitle('AD vs HC: Detailed Transfer Function Comparison', fontsize=16, fontweight='bold')
+    plt.tight_layout()
+    savepath2 = save_dir / 'ad_vs_hc_detailed_comparison.png'
+    plt.savefig(savepath2, dpi=300, bbox_inches='tight', facecolor='white')
+    plt.close()
+    print(f"  Saved: {savepath2}")
+
+    fig3, axes = plt.subplots(2, 2, figsize=(16, 12))
+    for ax, group_results, color, label in [
+        (axes[0, 0], ad_results, color_ad, 'AD LTI'),
+        (axes[0, 1], hc_results, color_hc, 'HC LTI'),
+        (axes[1, 0], ad_results, color_ad, 'AD TV'),
+        (axes[1, 1], hc_results, color_hc, 'HC TV'),
+    ]:
+        linestyle = '--' if 'TV' in label else '-'
+        for r in group_results:
+            curve = r['G_tv_mean'].mean(axis=1) if 'TV' in label else r['G_lti'].mean(axis=1)
+            ax.plot(freqs_hz, curve, color=color, alpha=0.3, linewidth=1.2, linestyle=linestyle)
+        group_curve = (np.array([r['G_tv_mean'].mean(axis=1) for r in group_results]).mean(axis=0)
+                       if 'TV' in label else
+                       np.array([r['G_lti'].mean(axis=1) for r in group_results]).mean(axis=0))
+        ax.plot(freqs_hz, group_curve, color=color, linewidth=3.5, linestyle=linestyle, label=f'{label} mean')
+        ax.set_xlabel('Frequency (Hz)', fontsize=12, fontweight='bold')
+        ax.set_ylabel('Mode-Averaged |G|', fontsize=12, fontweight='bold')
+        ax.set_title(f'({\"ABCD\"[axes.tolist().index(ax)]}) {label}', fontsize=13, fontweight='bold', loc='left')
+        ax.legend(fontsize=10, framealpha=0.95)
+        ax.grid(True, alpha=0.3)
+        ax.set_xlim([freqs_hz.min(), freqs_hz.max()])
+        ax.spines['top'].set_visible(False)
+        ax.spines['right'].set_visible(False)
+
+    plt.suptitle('AD vs HC: Individual Subject Frequency Responses', fontsize=16, fontweight='bold')
+    plt.tight_layout()
+    savepath3 = save_dir / 'ad_vs_hc_individual_traces.png'
+    plt.savefig(savepath3, dpi=300, bbox_inches='tight', facecolor='white')
+    plt.close()
+    print(f"  Saved: {savepath3}")
+
 # ============================================================================
 # Main Analysis
 # ============================================================================
@@ -2154,149 +2110,6 @@ def main():
     band_stats_csv = OUT_DIR / 'frequency_band_statistics.csv'
     band_stats_df.to_csv(band_stats_csv, index=False)
     print(f"\nSaved frequency band statistics: {band_stats_csv}")
-
-    # Advanced analyses
-    print("\n" + "="*80)
-    print("ADVANCED GRAPH-SPECTRAL ANALYSES")
-    print("="*80)
-    analysis_dir = OUT_DIR / "advanced_analyses"
-    analysis_dir.mkdir(exist_ok=True)
-
-    freqs = ad_results[0]['freqs_hz']
-    lambdas = ad_results[0]['lambdas']
-    graph_idx = np.arange(len(lambdas))
-
-    # Statistical map across (ω, λ)
-    print("\nComputing statistical map across (ω, λ)...")
-    stat_dir = analysis_dir / "statistical_map"
-    stat_dir.mkdir(exist_ok=True)
-    lti_surface = compute_statistical_map(ad_results, hc_results, model_key='G_lti')
-    np.savez(stat_dir / 'lti_stat_map.npz', **{k: v for k, v in lti_surface.items()
-                                               if isinstance(v, np.ndarray)})
-    print(f"  Significant bins: {lti_surface['n_significant']} "
-          f"({lti_surface['percent_significant']:.1f}%)")
-
-    def _plot_surface(array: np.ndarray, title: str, filename: str,
-                      cmap: str = 'RdBu_r', sig_mask: Optional[np.ndarray] = None):
-        fig, ax = plt.subplots(figsize=(10, 5))
-        extent = [graph_idx.min(), graph_idx.max(), freqs.min(), freqs.max()]
-        im = ax.imshow(array, aspect='auto', origin='lower', cmap=cmap, extent=extent)
-        ax.set_xlabel('Graph Frequency Index')
-        ax.set_ylabel('Frequency (Hz)')
-        ax.set_title(title, fontweight='bold')
-        add_eigenvalue_secondary_axis(ax, lambdas, n_ticks=8)
-        plt.colorbar(im, ax=ax)
-        if sig_mask is not None:
-            cs = ax.contour(graph_idx, freqs, sig_mask.astype(float), levels=[0.5],
-                            colors='white', linewidths=1.0)
-            cs.collections[0].set_label('FDR < 0.05')
-            ax.legend(loc='upper right')
-        plt.tight_layout()
-        plt.savefig(stat_dir / filename, dpi=300, bbox_inches='tight', facecolor='white')
-        plt.close(fig)
-
-    _plot_surface(lti_surface['t_map'], 't-statistics (LTI)', 'lti_t_map.png')
-    _plot_surface(lti_surface['effect_size'], 'Effect Size (Cohen d, LTI)',
-                  'lti_effect_map.png', cmap='coolwarm',
-                  sig_mask=lti_surface['significant_mask'])
-    _plot_surface(lti_surface['p_corrected'], 'FDR-corrected p-values (LTI)',
-                  'lti_pcorr_map.png', cmap='viridis')
-
-    # Frequency band × mode breakdown
-    band_mode_df = analyze_by_band_and_mode(ad_results, hc_results)
-    band_mode_path = analysis_dir / 'band_mode_breakdown.csv'
-    band_mode_df.to_csv(band_mode_path, index=False)
-    print(f"  Saved band × mode breakdown: {band_mode_path}")
-
-    if not band_mode_df.empty:
-        pivot = band_mode_df.pivot_table(index='band', columns='mode_group',
-                                         values='cohens_d')
-        fig, ax = plt.subplots(figsize=(8, 5))
-        im = ax.imshow(pivot.values, aspect='auto', cmap='coolwarm',
-                       vmin=-np.abs(pivot.values).max(),
-                       vmax=np.abs(pivot.values).max())
-        ax.set_xticks(range(len(pivot.columns)))
-        ax.set_xticklabels(pivot.columns, rotation=45, ha='right')
-        ax.set_yticks(range(len(pivot.index)))
-        ax.set_yticklabels(pivot.index)
-        ax.set_title('Effect size by frequency band and mode group', fontweight='bold')
-        plt.colorbar(im, ax=ax, label="Cohen's d (AD - HC)")
-        plt.tight_layout()
-        plt.savefig(analysis_dir / 'band_mode_heatmap.png', dpi=300,
-                    bbox_inches='tight', facecolor='white')
-        plt.close(fig)
-
-    # Graph mode interpretation
-    print("\nInterpreting graph eigenmodes...")
-    try:
-        _, ch_names = load_and_preprocess_eeg(AD_PATHS[0], BAND, TARGET_SFREQ)
-    except Exception:
-        ch_names = [f"Ch{i+1}" for i in range(L_norm.shape[0])]
-    mode_summaries = interpret_graph_modes(L_norm, ch_names)
-    pd.DataFrame(mode_summaries).to_csv(analysis_dir / 'graph_mode_summary.csv', index=False)
-    create_topomap_for_modes(L_norm, ch_names, analysis_dir / 'graph_modes_topomap.png')
-
-    # GP-VAR vs VAR comparison on representative subjects
-    print("\nComparing GP-VAR against standard VAR...")
-    model_comp_rows = []
-    for res in (ad_results[0], hc_results[0]):
-        try:
-            X_raw, _ = load_and_preprocess_eeg(res['filepath'], BAND, TARGET_SFREQ)
-            X_std = safe_zscore(X_raw, X_raw)
-            comp = compare_models(X_std, L_norm, res['best_P'], res['best_K'])
-            comp['subject_id'] = res['subject_id']
-            comp['group'] = res['group']
-            model_comp_rows.append(comp)
-        except Exception as exc:
-            print(f"  Warning: VAR comparison failed for {res['subject_id']}: {exc}")
-    if model_comp_rows:
-        model_comp_df = pd.DataFrame(model_comp_rows)
-        model_comp_path = analysis_dir / 'model_comparison_gpvar_vs_var.csv'
-        model_comp_df.to_csv(model_comp_path, index=False)
-        print(f"  Saved model comparison: {model_comp_path}")
-
-    # Classification analysis
-    clf_df = classification_analysis(ad_results, hc_results)
-    clf_path = analysis_dir / 'classification_auc.csv'
-    clf_df.to_csv(clf_path, index=False)
-    print(f"\nClassification summary:\n{clf_df}")
-
-    # Clinical correlation if scores are available
-    if CLINICAL_SCORES_PATH.exists():
-        scores_df = pd.read_csv(CLINICAL_SCORES_PATH)
-        score_map = dict(zip(scores_df['subject_id'], scores_df['score']))
-        clinical_df = correlate_with_clinical(ad_results + hc_results, score_map)
-        if not clinical_df.empty:
-            clinical_path = analysis_dir / 'clinical_correlations.csv'
-            clinical_df.to_csv(clinical_path, index=False)
-            print(f"\nClinical correlations saved to {clinical_path}")
-    else:
-        print("\nNo clinical_scores.csv found – skipping clinical correlations.")
-
-    # Dynamic stability differences
-    dyn_df, dyn_summary = analyze_dynamic_stability(ad_results, hc_results)
-    dyn_df_path = analysis_dir / 'dynamic_stability.csv'
-    dyn_df.to_csv(dyn_df_path, index=False)
-    with open(analysis_dir / 'dynamic_stability_summary.json', 'w') as f:
-        json.dump(dyn_summary, f, indent=2)
-
-    fig, ax = plt.subplots(figsize=(10, 4))
-    ax.plot(graph_idx, dyn_df['AD_variability'] - dyn_df['HC_variability'], 'k-', linewidth=2)
-    sig_mask = dyn_df['p_value'] < 0.05
-    ax.scatter(graph_idx[sig_mask],
-               (dyn_df['AD_variability'] - dyn_df['HC_variability'])[sig_mask],
-               color='red', label='p < 0.05')
-    ax.set_xlabel('Graph Frequency Index')
-    ax.set_ylabel('Δ Variability (AD - HC)')
-    ax.set_title('Dynamic variability differences across graph modes', fontweight='bold')
-    ax.grid(True, alpha=0.3)
-    add_eigenvalue_secondary_axis(ax, lambdas, n_ticks=8)
-    if sig_mask.any():
-        ax.legend()
-    plt.tight_layout()
-    plt.savefig(analysis_dir / 'dynamic_stability_difference.png', dpi=300,
-                bbox_inches='tight', facecolor='white')
-    plt.close()
     
     # Model selection analysis (for thesis)
     print("\n" + "="*80)
